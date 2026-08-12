@@ -54,8 +54,8 @@ class GatedCommandTree(app_commands.CommandTree):
             "btn_standard", "btn_custom", "btn_role", "vending_buy", "vending_products", 
             "vending_charge", "vending_info", "select_category", "select_buy_item", 
             "confirm_buy_item", "open_ticket", "close_ticket", "ticket_buy", 
-            "select_ticket_item", "verify_button", "dyn_notif_clear_all"
-        ] or custom_id.startswith("dyn_notif_"):
+            "select_ticket_item", "verify_button"
+        ] or custom_id.startswith("notif_role_"):
             return True
 
         # 슬래시 명령어 자체의 권한 체크
@@ -417,43 +417,70 @@ class VerifyView(discord.ui.View):
         await interaction.response.send_modal(VerifyModal(random_code))
 
 # ---------------------------------------------------------------------------
-# 동적 알림 역할 버튼 UI
+# 동적 알림 역할 버튼 UI & 전역 버튼 처리
 # ---------------------------------------------------------------------------
 class DynamicNotificationButton(discord.ui.Button):
-    def __init__(self, label: str, role_id: int, style: discord.ButtonStyle = discord.ButtonStyle.primary):
-        super().__init__(label=label, style=style, custom_id=f"dyn_notif_{role_id}")
+    def __init__(self, label: str, role_id: int):
+        super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=f"notif_role_{role_id}")
         self.role_id = role_id
-
-    async def callback(self, interaction: discord.Interaction):
-        role = interaction.guild.get_role(self.role_id)
-        if not role:
-            await interaction.response.send_message("❌ 부여할 역할을 서버에서 찾을 수 없습니다.", ephemeral=True)
-            return
-
-        if role in interaction.user.roles:
-            await interaction.user.remove_roles(role)
-            await interaction.response.send_message(f"🔕 {role.mention} 역할이 **해제**되었습니다.", ephemeral=True)
-        else:
-            await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"🔔 {role.mention} 역할이 **부여**되었습니다!", ephemeral=True)
 
 class ClearAllNotificationButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🧹 핑지우개", style=discord.ButtonStyle.secondary, custom_id="dyn_notif_clear_all")
+        super().__init__(label="🧹 핑지우개", style=discord.ButtonStyle.secondary, custom_id="notif_role_clear_all")
 
-    async def callback(self, interaction: discord.Interaction):
-        removed_roles = []
-        for child in self.view.children:
-            if isinstance(child, DynamicNotificationButton):
-                role = interaction.guild.get_role(child.role_id)
-                if role and role in interaction.user.roles:
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    # 슬래시 커맨드가 아닌 컴포넌트(버튼 등) 클릭만 감지
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id", "")
+        
+        if custom_id.startswith("notif_role_"):
+            await interaction.response.defer(ephemeral=True) # 응답 지연(타임아웃) 차단
+            
+            # 1. 핑지우개 버튼 처리
+            if custom_id == "notif_role_clear_all":
+                removed_roles = []
+                if interaction.message and interaction.message.components:
+                    for action_row in interaction.message.components:
+                        for comp in action_row.children:
+                            c_id = comp.custom_id or ""
+                            if c_id.startswith("notif_role_") and c_id != "notif_role_clear_all":
+                                r_id = int(c_id.replace("notif_role_", ""))
+                                role = interaction.guild.get_role(r_id)
+                                if role and role in interaction.user.roles:
+                                    try:
+                                        await interaction.user.remove_roles(role)
+                                        removed_roles.append(role.mention)
+                                    except discord.Forbidden:
+                                        pass
+                
+                if removed_roles:
+                    await interaction.followup.send(f"🧹 알림 역할이 모두 제거되었습니다: {', '.join(removed_roles)}", ephemeral=True)
+                else:
+                    await interaction.followup.send("🧹 제거할 알림 역할이 없습니다.", ephemeral=True)
+                return
+
+            # 2. 일반 알림 역할 토글 처리
+            role_id = int(custom_id.replace("notif_role_", ""))
+            role = interaction.guild.get_role(role_id)
+            
+            if not role:
+                await interaction.followup.send("❌ 부여할 역할을 서버에서 찾을 수 없습니다.", ephemeral=True)
+                return
+
+            if role in interaction.user.roles:
+                try:
                     await interaction.user.remove_roles(role)
-                    removed_roles.append(role.mention)
-
-        if removed_roles:
-            await interaction.response.send_message(f"🧹 알림 역할이 모두 제거되었습니다: {', '.join(removed_roles)}", ephemeral=True)
-        else:
-            await interaction.response.send_message("🧹 제거할 알림 역할이 없습니다.", ephemeral=True)
+                    await interaction.followup.send(f"🔕 {role.mention} 역할이 **해제**되었습니다.", ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.followup.send("⚠️ 봇의 역할 순위가 낮아 역할을 해제할 수 없습니다. 서버 설정에서 봇의 역할 위치를 올려주세요.", ephemeral=True)
+            else:
+                try:
+                    await interaction.user.add_roles(role)
+                    await interaction.followup.send(f"🔔 {role.mention} 역할이 **부여**되었습니다!", ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.followup.send("⚠️ 봇의 역할 순위가 낮아 역할을 부여할 수 없습니다. 서버 설정에서 봇의 역할 위치를 올려주세요.", ephemeral=True)
+            return
 
 # ---------------------------------------------------------------------------
 # 개발자 및 라이센스 명령어
@@ -556,7 +583,7 @@ async def add_standard_stock(interaction: discord.Interaction, 상품명: str, �
     conn = get_conn()
     conn.execute(
         "INSERT INTO prices (guild_id, item, price, target_type, is_permanent) VALUES (?, ?, ?, 'standard', 0) "
-        "ON CONFLICT(guild_id, item) DO UPDATE SET price = ?",
+        "ON CONFLICT(guild_id, item) DO UPDATE SET price = ?, target_type = 'standard', is_permanent = 0",
         (interaction.guild_id, 상품명, 가격, 가격)
     )
     conn.execute("INSERT INTO item_stocks (guild_id, item, content, is_used) VALUES (?, ?, ?, 0)", (interaction.guild_id, 상품명, 재고내용))
@@ -995,7 +1022,7 @@ class TicketControlView(discord.ui.View):
             pass
 
 # ---------------------------------------------------------------------------
-# 패널 생성 명령어 (자판기, 티켓, 인증, 동적 알림)
+# 패널 생성 및 알림 관련 명령어
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="자판기생성", description="[관리자/판매자] 현재 채널에 통합 자판기 메인 패널을 생성합니다.")
 @admin_or_seller_only()
@@ -1039,12 +1066,11 @@ async def verify_panel(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=VerifyView())
     await interaction.response.send_message("✅ 인증 패널이 생성되었습니다.", ephemeral=True)
 
-# ---------------------------------------------------------------------------
-# 동적 알림 패널 관련 명령어
-# ---------------------------------------------------------------------------
 @bot.tree.command(name="알림패널생성", description="[관리자/판매자] 기본 알림 설정 패널을 생성합니다.")
 @admin_or_seller_only()
 async def create_notification_panel(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True) # 타임아웃 완전 방지
+    
     embed = discord.Embed(
         title="🔔 알림 역할 설정",
         description="받으실 알림을 눌러주세요\n____________________",
@@ -1053,7 +1079,7 @@ async def create_notification_panel(interaction: discord.Interaction):
     view = discord.ui.View(timeout=None)
     
     msg = await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ 알림 패널이 생성되었습니다!\n"
         f"👉 **메시지 ID:** `{msg.id}`\n"
         f"이제 `/알림버튼추가` 명령어로 이 패널에 원하는 역할을 연결해주세요.",
@@ -1064,33 +1090,39 @@ async def create_notification_panel(interaction: discord.Interaction):
 @app_commands.describe(메시지id="알림 패널 메시지의 ID", 버튼이름="버튼에 표시될 이름", 지급역할="지급할 역할(@역할)")
 @admin_or_seller_only()
 async def add_notification_button(interaction: discord.Interaction, 메시지id: str, 버튼이름: str, 지급역할: discord.Role):
+    await interaction.response.defer(ephemeral=True)
+    
     try:
         target_msg = await interaction.channel.fetch_message(int(메시지id))
     except Exception:
-        await interaction.response.send_message("❌ 해당 메시지를 찾을 수 없습니다. 패널이 생성된 채널에서 실행해주세요.", ephemeral=True)
+        await interaction.followup.send("❌ 해당 메시지를 찾을 수 없습니다. 패널이 생성된 채널에서 실행해주세요.", ephemeral=True)
         return
 
     view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
+    view.timeout = None
     view.add_item(DynamicNotificationButton(label=버튼이름, role_id=지급역할.id))
     
     await target_msg.edit(view=view)
-    await interaction.response.send_message(f"✅ 패널에 **[{버튼이름}]** ({지급역할.mention}) 버튼이 추가되었습니다!", ephemeral=True)
+    await interaction.followup.send(f"✅ 패널에 **[{버튼이름}]** ({지급역할.mention}) 버튼이 추가되었습니다!", ephemeral=True)
 
 @bot.tree.command(name="핑지우개버튼추가", description="[관리자/판매자] 알림 패널에 모든 알림을 해제하는 핑지우개 버튼을 추가합니다.")
 @app_commands.describe(메시지id="알림 패널 메시지의 ID")
 @admin_or_seller_only()
 async def add_clear_button(interaction: discord.Interaction, 메시지id: str):
+    await interaction.response.defer(ephemeral=True)
+    
     try:
         target_msg = await interaction.channel.fetch_message(int(메시지id))
     except Exception:
-        await interaction.response.send_message("❌ 해당 메시지를 찾을 수 없습니다. 패널이 생성된 채널에서 실행해주세요.", ephemeral=True)
+        await interaction.followup.send("❌ 해당 메시지를 찾을 수 없습니다. 패널이 생성된 채널에서 실행해주세요.", ephemeral=True)
         return
 
     view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
+    view.timeout = None
     view.add_item(ClearAllNotificationButton())
     
     await target_msg.edit(view=view)
-    await interaction.response.send_message("✅ 패널에 **🧹 핑지우개** 버튼이 추가되었습니다!", ephemeral=True)
+    await interaction.followup.send("✅ 패널에 **🧹 핑지우개** 버튼이 추가되었습니다!", ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # 봇 실행
