@@ -167,7 +167,8 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
-            receipt_channel_id INTEGER
+            receipt_channel_id INTEGER,
+            welcome_channel_id INTEGER
         )
     """)
     cur.execute("""
@@ -199,6 +200,11 @@ def init_db():
 
     try:
         cur.execute("ALTER TABLE prices ADD COLUMN role_id INTEGER DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN welcome_channel_id INTEGER DEFAULT NULL")
     except sqlite3.OperationalError:
         pass
 
@@ -376,6 +382,63 @@ async def on_ready():
     except Exception as e:
         print(f"명령어 동기화 실패: {e}")
     print(f"✅ 로그인 완료: {bot.user}")
+
+# ---------------------------------------------------------------------------
+# 입퇴장 로그 이벤트 리스너 (시간 추가 및 디자인 개선)
+# ---------------------------------------------------------------------------
+@bot.event
+async def on_member_join(member: discord.Member):
+    conn = get_conn()
+    row = conn.execute("SELECT welcome_channel_id FROM guild_settings WHERE guild_id = ?", (member.guild.id,)).fetchone()
+    conn.close()
+
+    if row and row["welcome_channel_id"]:
+        ch = member.guild.get_channel(row["welcome_channel_id"])
+        if ch:
+            now_time = datetime.now(KST).strftime("%Y년 %m월 %d일 %p %I시 %M분").replace("AM", "오전").replace("PM", "오후")
+            
+            embed = discord.Embed(
+                title="✨ 새로운 멤버 입장",
+                description=f"환영합니다, {member.mention} 님! 🎉\n서버와 함께 즐거운 시간 보내세요!",
+                color=discord.Color.from_rgb(85, 239, 196),
+                timestamp=datetime.now(KST)
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="📌 가입 계정", value=f"`{member}`", inline=True)
+            embed.add_field(name="👥 현재 서버 인원", value=f"`{member.guild.member_count:,}명`", inline=True)
+            embed.set_footer(text=f"입장 시간: {now_time}")
+            
+            try:
+                await ch.send(embed=embed)
+            except Exception:
+                pass
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    conn = get_conn()
+    row = conn.execute("SELECT welcome_channel_id FROM guild_settings WHERE guild_id = ?", (member.guild.id,)).fetchone()
+    conn.close()
+
+    if row and row["welcome_channel_id"]:
+        ch = member.guild.get_channel(row["welcome_channel_id"])
+        if ch:
+            now_time = datetime.now(KST).strftime("%Y년 %m월 %d일 %p %I시 %M분").replace("AM", "오전").replace("PM", "오후")
+            
+            embed = discord.Embed(
+                title="👋 멤버 퇴장",
+                description=f"**{member}** 님이 서버를 떠나셨습니다.",
+                color=discord.Color.from_rgb(255, 118, 117),
+                timestamp=datetime.now(KST)
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="📌 퇴장 계정", value=f"`{member}`", inline=True)
+            embed.add_field(name="👥 남은 서버 인원", value=f"`{member.guild.member_count:,}명`", inline=True)
+            embed.set_footer(text=f"퇴장 시간: {now_time}")
+            
+            try:
+                await ch.send(embed=embed)
+            except Exception:
+                pass
 
 # ---------------------------------------------------------------------------
 # 보안 인증 UI
@@ -567,6 +630,19 @@ async def set_receipt_channel(interaction: discord.Interaction, 채널: discord.
     conn.commit()
     conn.close()
     await interaction.response.send_message(f"✅ 구매 영수증 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=True)
+
+@bot.tree.command(name="입퇴장채널설정", description="[관리자/판매자] 유저 입퇴장 로그가 출력될 채널을 지정합니다.")
+@app_commands.describe(채널="입퇴장 메시지가 전송될 텍스트 채널")
+@admin_or_seller_only()
+async def set_welcome_channel(interaction: discord.Interaction, 채널: discord.TextChannel):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO guild_settings (guild_id, welcome_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET welcome_channel_id = ?",
+        (interaction.guild_id, 채널.id, 채널.id)
+    )
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ 입퇴장 로그 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # [관리자/판매자] 상품 등록 및 권한 설정
@@ -1027,7 +1103,7 @@ class TicketControlView(discord.ui.View):
             pass
 
 # ---------------------------------------------------------------------------
-# 패널 생성 및 알림 관련 명령어 (메시지 ID 입력 불필요 버전)
+# 패널 생성 및 알림 관련 명령어
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="자판기생성", description="[관리자/판매자] 현재 채널에 통합 자판기 메인 패널을 생성합니다.")
 @admin_or_seller_only()
@@ -1092,7 +1168,6 @@ async def create_notification_panel(interaction: discord.Interaction):
 async def add_notification_button(interaction: discord.Interaction, 버튼이름: str, 지급역할: discord.Role):
     await interaction.response.defer(ephemeral=True)
     
-    # 해당 채널의 최근 메시지들을 불러와서 봇이 보낸 알림 패널 찾기
     target_msg = None
     async for message in interaction.channel.history(limit=20):
         if message.author == bot.user and message.embeds:
@@ -1124,7 +1199,7 @@ async def add_clear_button(interaction: discord.Interaction):
                 break
 
     if not target_msg:
-        await interaction.followup.send("❌ 이 채널에서 `🔔 알림 역할 설정` 패널 메시지를 찾지 못했습니다.", ephemeral=True)
+        await interaction.followup.send("❌ 이 채널에서 ``🔔 알림 역할 설정` 패널 메시지를 찾지 못했습니다.", ephemeral=True)
         return
 
     view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
