@@ -5,6 +5,7 @@ import asyncio
 import secrets
 import string
 import random
+import aiohttp
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -39,7 +40,7 @@ class GatedCommandTree(app_commands.CommandTree):
         data = getattr(interaction, "data", None) or {}
         cmd_name = data.get("name") if isinstance(data, dict) else getattr(data, "name", None)
 
-        if cmd_name == "라이센스등록":
+        if cmd_name in ["라이센스등록", "발로란트전적"]:
             return True
 
         if not is_guild_registered(interaction.guild_id):
@@ -68,7 +69,7 @@ class GatedCommandTree(app_commands.CommandTree):
                 return True
 
         if interaction.type == discord.InteractionType.application_command:
-            if cmd_name in ["포인트조회", "내구매내역", "라이센스등록"]:
+            if cmd_name in ["포인트조회", "내구매내역", "라이센스등록", "발로란트전적"]:
                 return True
                 
             if not is_admin_or_seller(interaction):
@@ -392,6 +393,55 @@ async def on_ready():
     print(f"✅ 로그인 완료: {bot.user}")
 
 # ---------------------------------------------------------------------------
+# 발로란트 전적 검색 명령어 추가
+# ---------------------------------------------------------------------------
+@bot.tree.command(name="발로란트전적", description="발로란트 유저의 티어 및 최근 전적을 검색합니다.")
+@app_commands.describe(닉네임="발로란트 닉네임", 태그="태그 (예: KR1, # 제외하고 입력 가능)")
+async def valorant_stats(interaction: discord.Interaction, 닉네임: str, 태그: str):
+    await interaction.response.defer()
+    
+    clean_tag = 태그.strip().lstrip("#")
+    url = f"https://api.henrikdev.xyz/valorant/v1/account/{urllib.parse.quote(닉네임)}/{urllib.parse.quote(clean_tag)}"
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                await interaction.followup.send("❌ 유저를 찾을 수 없거나 API 요청에 실패했습니다. 닉네임과 태그를 다시 확인해주세요.")
+                return
+            data = await resp.json()
+            
+    try:
+        account_data = data.get("data", {})
+        puuid = account_data.get("puuid")
+        region = account_data.get("region", "kr")
+        card_url = account_data.get("card", {}).get("large")
+        
+        # MMR 정보 가져오기
+        mmr_url = f"https://api.henrikdev.xyz/valorant/v2/mmr/{region}/{urllib.parse.quote(닉네임)}/{urllib.parse.quote(clean_tag)}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(mmr_url) as resp:
+                mmr_data = await resp.json() if resp.status == 200 else {}
+                
+        current_data = mmr_data.get("data", {}).get("current_data", {})
+        tier_name = current_data.get("currenttierpatched", "Unranked")
+        rr = current_data.get("ranking_in_tier", 0)
+        
+        embed = discord.Embed(
+            title=f"🎮 발로란트 전적 검색: {닉네임}#{clean_tag}",
+            color=discord.Color.from_rgb(255, 70, 85),
+            timestamp=datetime.now(KST)
+        )
+        if card_url:
+            embed.set_thumbnail(url=card_url)
+            
+        embed.add_field(name="🏆 현재 티어", value=f"**{tier_name}** ({rr} RR)", inline=False)
+        embed.set_footer(text="Data provided by HenrikDev API")
+        
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ 데이터를 처리하는 중 오류가 발생했습니다: {e}")
+
+# ---------------------------------------------------------------------------
 # 입퇴장 로그 이벤트 리스너 (재입장 횟수 및 내보내기 버튼 추가)
 # ---------------------------------------------------------------------------
 class MemberModView(discord.ui.View):
@@ -532,18 +582,12 @@ async def on_interaction(interaction: discord.Interaction):
         data = getattr(interaction, "data", None) or {}
         custom_id = data.get("custom_id", "") if isinstance(data, dict) else getattr(data, "custom_id", "")
         
-        # 퇴장 로그 내보내기 버튼 처리 (관리자 및 판매자만 허용)
         if custom_id.startswith("mod_kick_") or custom_id.startswith("mod_ban_"):
             if not is_admin_or_seller(interaction):
                 await interaction.response.send_message("❌ 이 버튼은 관리자 권한을 가진 유저만 누를 수 있습니다.", ephemeral=True)
                 return
 
             target_id = int(custom_id.split("_")[-1])
-            try:
-                user_obj = await bot.fetch_user(target_id)
-            except Exception:
-                user_obj = None
-
             if custom_id.startswith("mod_kick_"):
                 try:
                     await interaction.guild.kick(discord.Object(id=target_id), reason=f"로그 패널을 통한 관리자({interaction.user}) 추방")
