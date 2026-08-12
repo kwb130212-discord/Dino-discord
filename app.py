@@ -48,19 +48,19 @@ class GatedCommandTree(app_commands.CommandTree):
             )
             return False
 
-        # 자판기, 티켓, 인증 버튼 상호작용은 일반 유저 누구나 허용
-        custom_id = interaction.data.get("custom_id") if interaction.data else None
+        # 자판기, 티켓, 인증, 동적 알림 버튼 상호작용은 일반 유저 누구나 허용
+        custom_id = interaction.data.get("custom_id") if interaction.data else ""
         if custom_id in [
             "btn_standard", "btn_custom", "btn_role", "vending_buy", "vending_products", 
             "vending_charge", "vending_info", "select_category", "select_buy_item", 
             "confirm_buy_item", "open_ticket", "close_ticket", "ticket_buy", 
-            "select_ticket_item", "verify_button"
-        ]:
+            "select_ticket_item", "verify_button", "dyn_notif_clear_all"
+        ] or custom_id.startswith("dyn_notif_"):
             return True
 
-        # 슬래시 명령어 자체의 유권자 체크
+        # 슬래시 명령어 자체의 권한 체크
         if interaction.type == discord.InteractionType.application_command:
-            # 유저용 명령어 제외
+            # 일반 유저용 명령어 제외
             if cmd_name in ["포인트조회", "내구매내역", "라이센스등록"]:
                 return True
                 
@@ -87,7 +87,6 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
     
-    # prices 테이블 (type: standard, custom, role)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS prices (
             guild_id INTEGER NOT NULL,
@@ -191,7 +190,6 @@ def init_db():
         )
     """)
 
-    # 테이블 컬럼 확장 마이그레이션
     try:
         cur.execute("ALTER TABLE prices ADD COLUMN role_id INTEGER DEFAULT NULL")
     except sqlite3.OperationalError:
@@ -360,7 +358,7 @@ def get_user_tier_info(guild_id: int, user_id: int) -> dict:
 @bot.event
 async def on_ready():
     init_db()
-    # 지속적인 버튼 작동을 위한 뷰 등록
+    # 지속성 버튼 뷰 등록
     bot.add_view(MainVendingView())
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
@@ -417,6 +415,45 @@ class VerifyView(discord.ui.View):
     async def verify_button_click(self, interaction: discord.Interaction, button: discord.ui.Button):
         random_code = random.randint(1000, 9999)
         await interaction.response.send_modal(VerifyModal(random_code))
+
+# ---------------------------------------------------------------------------
+# 동적 알림 역할 버튼 UI
+# ---------------------------------------------------------------------------
+class DynamicNotificationButton(discord.ui.Button):
+    def __init__(self, label: str, role_id: int, style: discord.ButtonStyle = discord.ButtonStyle.primary):
+        super().__init__(label=label, style=style, custom_id=f"dyn_notif_{role_id}")
+        self.role_id = role_id
+
+    async def callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ 부여할 역할을 서버에서 찾을 수 없습니다.", ephemeral=True)
+            return
+
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role)
+            await interaction.response.send_message(f"🔕 {role.mention} 역할이 **해제**되었습니다.", ephemeral=True)
+        else:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"🔔 {role.mention} 역할이 **부여**되었습니다!", ephemeral=True)
+
+class ClearAllNotificationButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="🧹 핑지우개", style=discord.ButtonStyle.secondary, custom_id="dyn_notif_clear_all")
+
+    async def callback(self, interaction: discord.Interaction):
+        removed_roles = []
+        for child in self.view.children:
+            if isinstance(child, DynamicNotificationButton):
+                role = interaction.guild.get_role(child.role_id)
+                if role and role in interaction.user.roles:
+                    await interaction.user.remove_roles(role)
+                    removed_roles.append(role.mention)
+
+        if removed_roles:
+            await interaction.response.send_message(f"🧹 알림 역할이 모두 제거되었습니다: {', '.join(removed_roles)}", ephemeral=True)
+        else:
+            await interaction.response.send_message("🧹 제거할 알림 역할이 없습니다.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # 개발자 및 라이센스 명령어
@@ -500,7 +537,7 @@ async def set_receipt_channel(interaction: discord.Interaction, 채널: discord.
     await interaction.response.send_message(f"✅ 구매 영수증 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
-# [관리자/판매자] 상품 등록 명령어 (일반, 커스텀, 역할)
+# [관리자/판매자] 상품 등록 및 권한 설정
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="판매자등록", description="[관리자] 특정 유저에게 패널 및 상품 관리 권한을 부여합니다.")
 @app_commands.describe(유저="판매자로 등록할 유저 멘션 (@유저)")
@@ -512,19 +549,16 @@ async def register_seller(interaction: discord.Interaction, 유저: discord.Memb
     add_bot_seller(interaction.guild_id, 유저.id, interaction.user.id)
     await interaction.response.send_message(f"✅ {유저.mention}님을 **판매자**로 등록했습니다.", ephemeral=True)
 
-# 1) 일반 자판기 상품 등록 (차감형 - 가격 및 재고 연동)
 @bot.tree.command(name="일반등록", description="[관리자/판매자] 일반 자판기 상품 등록 및 1회성 재고를 추가합니다.")
 @app_commands.describe(상품명="상품 이름", 가격="상품 가격(원)", 재고내용="DM으로 발송될 핀코드/계정 등")
 @admin_or_seller_only()
 async def add_standard_stock(interaction: discord.Interaction, 상품명: str, 가격: int, 재고내용: str):
     conn = get_conn()
-    # 가격 등록/업데이트
     conn.execute(
         "INSERT INTO prices (guild_id, item, price, target_type, is_permanent) VALUES (?, ?, ?, 'standard', 0) "
         "ON CONFLICT(guild_id, item) DO UPDATE SET price = ?",
         (interaction.guild_id, 상품명, 가격, 가격)
     )
-    # 재고 추가
     conn.execute("INSERT INTO item_stocks (guild_id, item, content, is_used) VALUES (?, ?, ?, 0)", (interaction.guild_id, 상품명, 재고내용))
     stock_count = conn.execute("SELECT COUNT(*) as cnt FROM item_stocks WHERE guild_id = ? AND item = ? AND is_used = 0", (interaction.guild_id, 상품명)).fetchone()["cnt"]
     conn.execute("UPDATE prices SET stock = ? WHERE guild_id = ? AND item = ?", (stock_count, interaction.guild_id, 상품명))
@@ -533,7 +567,6 @@ async def add_standard_stock(interaction: discord.Interaction, 상품명: str, �
 
     await interaction.response.send_message(f"✅ **[일반]** `{상품명}` (`{fmt_won(가격)}`) 재고가 추가되었습니다. (남은 재고: **{stock_count}개**)", ephemeral=True)
 
-# 2) 커스텀 자판기 상품 등록 (무제한/고정형 메시지)
 @bot.tree.command(name="커스텀등록", description="[관리자/판매자] 커스텀 자판기 상품(고정 메시지/다운로드 링크)을 등록합니다.")
 @app_commands.describe(상품명="상품 이름", 가격="상품 가격(원)", 발송내용="DM으로 발송할 고정 안내문/링크")
 @admin_or_seller_only()
@@ -553,7 +586,6 @@ async def register_custom(interaction: discord.Interaction, 상품명: str, 가�
 
     await interaction.response.send_message(f"✅ **[커스텀]** `{상품명}` (`{fmt_won(가격)}`) 상품이 등록되었습니다.", ephemeral=True)
 
-# 3) 역할 자판기 상품 등록 (역할 부여)
 @bot.tree.command(name="역할등록", description="[관리자/판매자] 역할 지급 자판기 상품을 등록합니다.")
 @app_commands.describe(상품명="상품 이름", 가격="상품 가격(원)", 부여역할="지급할 디스코드 역할")
 @admin_or_seller_only()
@@ -628,7 +660,7 @@ async def check_my_transactions(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ---------------------------------------------------------------------------
-# 핵심 구매 처리 로직 (일반, 커스텀, 역할 통합 처리)
+# 구매 처리 로직
 # ---------------------------------------------------------------------------
 async def process_purchase(interaction: discord.Interaction, item_name: str, quantity: int, total_price: int, memo_text: str = "자판기 구매"):
     guild_id = interaction.guild_id
@@ -651,7 +683,6 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
     role_id = item_info["role_id"]
     combined_accounts = ""
 
-    # 1. 일반 상품 (차감형 소모 재고)
     if target_type == "standard":
         stock_rows = conn.execute("SELECT * FROM item_stocks WHERE guild_id = ? AND item = ? AND is_used = 0 LIMIT ?", (guild_id, item_name, quantity)).fetchall()
         if len(stock_rows) < quantity:
@@ -668,7 +699,6 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
         real_stock_count = conn.execute("SELECT COUNT(*) as cnt FROM item_stocks WHERE guild_id = ? AND item = ? AND is_used = 0", (guild_id, item_name)).fetchone()["cnt"]
         conn.execute("UPDATE prices SET stock = ? WHERE guild_id = ? AND item = ?", (real_stock_count, guild_id, item_name))
 
-    # 2. 커스텀 상품 (고정형 다운로드 링크/문구)
     elif target_type == "custom":
         perm_row = conn.execute("SELECT content FROM permanent_stocks WHERE guild_id = ? AND item = ?", (guild_id, item_name)).fetchone()
         if not perm_row:
@@ -677,7 +707,6 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
             return
         combined_accounts = perm_row["content"]
 
-    # 3. 역할 자판기 (역할 부여)
     elif target_type == "role":
         role = interaction.guild.get_role(role_id)
         if not role:
@@ -698,7 +727,6 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
             await interaction.response.send_message("❌ 권한 오류: 봇 역할의 순위가 지급할 역할보다 위에 있어야 합니다.", ephemeral=True)
             return
 
-    # 포인트 차감 및 거래 저장
     conn.execute("UPDATE user_points SET points = points - ? WHERE guild_id = ? AND user_id = ?", (total_price, guild_id, user_id))
     cur = conn.cursor()
     cur.execute(
@@ -710,7 +738,6 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
     conn.commit()
     conn.close()
 
-    # 영수증 발행
     tier_info = get_user_tier_info(guild_id, user_id)
     tier_text = f" ({tier_info['icon']} {tier_info['name']} {int(tier_info['discount_rate']*100)}% 할인 적용)" if tier_info['discount_rate'] > 0 else ""
 
@@ -729,7 +756,6 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
         timestamp=datetime.now(KST)
     )
 
-    # DM 발송 (역할 구매인 경우 안내만 발송)
     dm_success = True
     try:
         dm_embed = discord.Embed(
@@ -742,7 +768,6 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
     except Exception:
         dm_success = False
 
-    # 서버 영수증 채널 발송
     if setting_row and setting_row["receipt_channel_id"]:
         receipt_channel = interaction.guild.get_channel(setting_row["receipt_channel_id"])
         if receipt_channel:
@@ -760,13 +785,12 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
     await interaction.response.send_message(msg, ephemeral=True)
 
 # ---------------------------------------------------------------------------
-# 통합 자판기 패널 UI 및 드롭다운
+# 자판기 패널 UI 및 드롭다운
 # ---------------------------------------------------------------------------
 class MainVendingView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    # 1. 일반 자판기
     @discord.ui.button(label="📦 일반 자판기", style=discord.ButtonStyle.primary, custom_id="btn_standard")
     async def standard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         conn = get_conn()
@@ -781,7 +805,6 @@ class MainVendingView(discord.ui.View):
         view.add_item(VendingItemSelect(options))
         await interaction.response.send_message("📦 구매할 일반 상품을 선택해주세요:", view=view, ephemeral=True)
 
-    # 2. 커스텀 자판기
     @discord.ui.button(label="🎨 커스텀 자판기", style=discord.ButtonStyle.success, custom_id="btn_custom")
     async def custom_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         conn = get_conn()
@@ -796,7 +819,6 @@ class MainVendingView(discord.ui.View):
         view.add_item(VendingItemSelect(options))
         await interaction.response.send_message("🎨 발송받을 커스텀 상품을 선택해주세요:", view=view, ephemeral=True)
 
-    # 3. 역할 자판기
     @discord.ui.button(label="👑 역할 자판기", style=discord.ButtonStyle.secondary, custom_id="btn_role")
     async def role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         conn = get_conn()
@@ -852,7 +874,6 @@ class QuantityModal(discord.ui.Modal, title="🧮 수량 선택 및 결제 확�
         stock = item_row["stock"]
         target_type = item_row["target_type"]
 
-        # 일반 상품 수량 재고 체크
         if target_type == "standard" and stock < qty:
             await interaction.response.send_message(f"❌ 재고가 부족합니다! (남은 재고: {stock}개)", ephemeral=True)
             return
@@ -974,7 +995,7 @@ class TicketControlView(discord.ui.View):
             pass
 
 # ---------------------------------------------------------------------------
-# 패널 생성 명령어 (관리자/판매자)
+# 패널 생성 명령어 (자판기, 티켓, 인증, 동적 알림)
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="자판기생성", description="[관리자/판매자] 현재 채널에 통합 자판기 메인 패널을 생성합니다.")
 @admin_or_seller_only()
@@ -1018,6 +1039,62 @@ async def verify_panel(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=VerifyView())
     await interaction.response.send_message("✅ 인증 패널이 생성되었습니다.", ephemeral=True)
 
+# ---------------------------------------------------------------------------
+# 동적 알림 패널 관련 명령어
+# ---------------------------------------------------------------------------
+@bot.tree.command(name="알림패널생성", description="[관리자/판매자] 기본 알림 설정 패널을 생성합니다.")
+@admin_or_seller_only()
+async def create_notification_panel(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔔 알림 역할 설정",
+        description="받으실 알림을 눌러주세요\n____________________",
+        color=discord.Color.gold()
+    )
+    view = discord.ui.View(timeout=None)
+    
+    msg = await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message(
+        f"✅ 알림 패널이 생성되었습니다!\n"
+        f"👉 **메시지 ID:** `{msg.id}`\n"
+        f"이제 `/알림버튼추가` 명령어로 이 패널에 원하는 역할을 연결해주세요.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="알림버튼추가", description="[관리자/판매자] 알림 패널에 특정 역할 지급 버튼을 추가합니다.")
+@app_commands.describe(메시지id="알림 패널 메시지의 ID", 버튼이름="버튼에 표시될 이름", 지급역할="지급할 역할(@역할)")
+@admin_or_seller_only()
+async def add_notification_button(interaction: discord.Interaction, 메시지id: str, 버튼이름: str, 지급역할: discord.Role):
+    try:
+        target_msg = await interaction.channel.fetch_message(int(메시지id))
+    except Exception:
+        await interaction.response.send_message("❌ 해당 메시지를 찾을 수 없습니다. 패널이 생성된 채널에서 실행해주세요.", ephemeral=True)
+        return
+
+    view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
+    view.add_item(DynamicNotificationButton(label=버튼이름, role_id=지급역할.id))
+    
+    await target_msg.edit(view=view)
+    await interaction.response.send_message(f"✅ 패널에 **[{버튼이름}]** ({지급역할.mention}) 버튼이 추가되었습니다!", ephemeral=True)
+
+@bot.tree.command(name="핑지우개버튼추가", description="[관리자/판매자] 알림 패널에 모든 알림을 해제하는 핑지우개 버튼을 추가합니다.")
+@app_commands.describe(메시지id="알림 패널 메시지의 ID")
+@admin_or_seller_only()
+async def add_clear_button(interaction: discord.Interaction, 메시지id: str):
+    try:
+        target_msg = await interaction.channel.fetch_message(int(메시지id))
+    except Exception:
+        await interaction.response.send_message("❌ 해당 메시지를 찾을 수 없습니다. 패널이 생성된 채널에서 실행해주세요.", ephemeral=True)
+        return
+
+    view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
+    view.add_item(ClearAllNotificationButton())
+    
+    await target_msg.edit(view=view)
+    await interaction.response.send_message("✅ 패널에 **🧹 핑지우개** 버튼이 추가되었습니다!", ephemeral=True)
+
+# ---------------------------------------------------------------------------
+# 봇 실행
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
         raise SystemExit("❌ DISCORD_TOKEN이 설정되지 않았습니다. .env 환경변수를 설정하거나 토큰을 입력하세요.")
