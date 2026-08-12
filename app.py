@@ -36,7 +36,10 @@ class GatedCommandTree(app_commands.CommandTree):
             await interaction.response.send_message("이 봇은 서버 안에서만 사용할 수 있어요.", ephemeral=True)
             return False
 
-        cmd_name = interaction.data.get("name") if interaction.data else None
+        # interaction.data가 없거나 슬래시 명령어일 경우 안전하게 처리
+        data = getattr(interaction, "data", None) or {}
+        cmd_name = data.get("name") if isinstance(data, dict) else getattr(data, "name", None)
+
         if cmd_name == "라이센스등록":
             return True
 
@@ -48,15 +51,24 @@ class GatedCommandTree(app_commands.CommandTree):
             )
             return False
 
+        # custom_id 안전하게 추출 (NoneType 예외 방지 수정 완료)
+        custom_id = None
+        if isinstance(data, dict):
+            custom_id = data.get("custom_id")
+        else:
+            custom_id = getattr(data, "custom_id", None)
+
         # 자판기, 티켓, 인증, 동적 알림 버튼 상호작용은 일반 유저 누구나 허용
-        custom_id = interaction.data.get("custom_id") if interaction.data else ""
-        if custom_id in [
+        allowed_custom_ids = [
             "btn_standard", "btn_custom", "btn_role", "vending_buy", "vending_products", 
             "vending_charge", "vending_info", "select_category", "select_buy_item", 
             "confirm_buy_item", "open_ticket", "close_ticket", "ticket_buy", 
             "select_ticket_item", "verify_button"
-        ] or custom_id.startswith("notif_role_"):
-            return True
+        ]
+        
+        if custom_id:
+            if custom_id in allowed_custom_ids or custom_id.startswith("notif_role_"):
+                return True
 
         # 슬래시 명령어 자체의 권한 체크
         if interaction.type == discord.InteractionType.application_command:
@@ -432,10 +444,12 @@ class ClearAllNotificationButton(discord.ui.Button):
 async def on_interaction(interaction: discord.Interaction):
     # 슬래시 커맨드가 아닌 컴포넌트(버튼 등) 클릭만 감지
     if interaction.type == discord.InteractionType.component:
-        custom_id = interaction.data.get("custom_id", "")
+        data = getattr(interaction, "data", None) or {}
+        custom_id = data.get("custom_id", "") if isinstance(data, dict) else getattr(data, "custom_id", "")
         
-        if custom_id.startswith("notif_role_"):
-            await interaction.response.defer(ephemeral=True) # 응답 지연(타임아웃) 차단
+        if custom_id and custom_id.startswith("notif_role_"):
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True) # 응답 지연(타임아웃) 차단
             
             # 1. 핑지우개 버튼 처리
             if custom_id == "notif_role_clear_all":
@@ -443,7 +457,7 @@ async def on_interaction(interaction: discord.Interaction):
                 if interaction.message and interaction.message.components:
                     for action_row in interaction.message.components:
                         for comp in action_row.children:
-                            c_id = comp.custom_id or ""
+                            c_id = getattr(comp, "custom_id", "") or ""
                             if c_id.startswith("notif_role_") and c_id != "notif_role_clear_all":
                                 r_id = int(c_id.replace("notif_role_", ""))
                                 role = interaction.guild.get_role(r_id)
