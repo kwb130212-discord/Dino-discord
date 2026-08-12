@@ -535,7 +535,7 @@ async def on_interaction(interaction: discord.Interaction):
         # 퇴장 로그 내보내기 버튼 처리 (관리자 및 판매자만 허용)
         if custom_id.startswith("mod_kick_") or custom_id.startswith("mod_ban_"):
             if not is_admin_or_seller(interaction):
-                await interaction.response.send_message("❌ 이 버튼은 관리자 권한을 가진 유저만 누할 수 있습니다.", ephemeral=True)
+                await interaction.response.send_message("❌ 이 버튼은 관리자 권한을 가진 유저만 누를 수 있습니다.", ephemeral=True)
                 return
 
             target_id = int(custom_id.split("_")[-1])
@@ -698,6 +698,18 @@ async def set_welcome_channel(interaction: discord.Interaction, 채널: discord.
     conn.commit()
     conn.close()
     await interaction.response.send_message(f"✅ 입퇴장 로그 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=True)
+
+@bot.tree.command(name="입퇴장로그해제", description="[관리자/판매자] 설정된 유저 입퇴장 로그 기능을 해제(중단)합니다.")
+@admin_or_seller_only()
+async def unset_welcome_channel(interaction: discord.Interaction):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE guild_settings SET welcome_channel_id = NULL WHERE guild_id = ?",
+        (interaction.guild_id,)
+    )
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message("✅ 입퇴장 로그 기능이 성공적으로 **해제**되었습니다. 더 이상 로그가 출력되지 않습니다.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # [관리자/판매자] 상품 등록 및 권한 설정
