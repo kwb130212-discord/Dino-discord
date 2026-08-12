@@ -64,7 +64,7 @@ class GatedCommandTree(app_commands.CommandTree):
         ]
         
         if custom_id:
-            if custom_id in allowed_custom_ids or custom_id.startswith("notif_role_"):
+            if custom_id in allowed_custom_ids or custom_id.startswith("notif_role_") or custom_id.startswith("mod_kick_") or custom_id.startswith("mod_ban_"):
                 return True
 
         if interaction.type == discord.InteractionType.application_command:
@@ -195,6 +195,14 @@ def init_db():
             guild_id INTEGER NOT NULL,
             owner_id INTEGER NOT NULL,
             opened_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_join_counts (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            join_count INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
         )
     """)
 
@@ -384,11 +392,27 @@ async def on_ready():
     print(f"✅ 로그인 완료: {bot.user}")
 
 # ---------------------------------------------------------------------------
-# 입퇴장 로그 이벤트 리스너 (시간 추가 및 디자인 개선)
+# 입퇴장 로그 이벤트 리스너 (재입장 횟수 및 내보내기 버튼 추가)
 # ---------------------------------------------------------------------------
+class MemberModView(discord.ui.View):
+    def __init__(self, target_user_id: int):
+        super().__init__(timeout=None)
+        self.target_user_id = target_user_id
+        
+        self.add_item(discord.ui.Button(label="🔨 추방(Kick)", style=discord.ButtonStyle.danger, custom_id=f"mod_kick_{target_user_id}"))
+        self.add_item(discord.ui.Button(label="🚫 차단(Ban)", style=discord.ButtonStyle.secondary, custom_id=f"mod_ban_{target_user_id}"))
+
 @bot.event
 async def on_member_join(member: discord.Member):
     conn = get_conn()
+    conn.execute(
+        "INSERT INTO user_join_counts (guild_id, user_id, join_count) VALUES (?, ?, 1) "
+        "ON CONFLICT(guild_id, user_id) DO UPDATE SET join_count = join_count + 1",
+        (member.guild.id, member.id)
+    )
+    join_row = conn.execute("SELECT join_count FROM user_join_counts WHERE guild_id = ? AND user_id = ?", (member.guild.id, member.id)).fetchone()
+    join_count = join_row["join_count"] if join_row else 1
+
     row = conn.execute("SELECT welcome_channel_id FROM guild_settings WHERE guild_id = ?", (member.guild.id,)).fetchone()
     conn.close()
 
@@ -405,6 +429,7 @@ async def on_member_join(member: discord.Member):
             )
             embed.set_thumbnail(url=member.display_avatar.url)
             embed.add_field(name="📌 가입 계정", value=f"`{member}`", inline=True)
+            embed.add_field(name="🔄 방문 횟수", value=f"총 **{join_count}번째** 입장", inline=True)
             embed.add_field(name="👥 현재 서버 인원", value=f"`{member.guild.member_count:,}명`", inline=True)
             embed.set_footer(text=f"입장 시간: {now_time}")
             
@@ -416,6 +441,9 @@ async def on_member_join(member: discord.Member):
 @bot.event
 async def on_member_remove(member: discord.Member):
     conn = get_conn()
+    join_row = conn.execute("SELECT join_count FROM user_join_counts WHERE guild_id = ? AND user_id = ?", (member.guild.id, member.id)).fetchone()
+    join_count = join_row["join_count"] if join_row else 1
+
     row = conn.execute("SELECT welcome_channel_id FROM guild_settings WHERE guild_id = ?", (member.guild.id,)).fetchone()
     conn.close()
 
@@ -425,18 +453,19 @@ async def on_member_remove(member: discord.Member):
             now_time = datetime.now(KST).strftime("%Y년 %m월 %d일 %p %I시 %M분").replace("AM", "오전").replace("PM", "오후")
             
             embed = discord.Embed(
-                title="👋 멤버 퇴장",
-                description=f"**{member}** 님이 서버를 떠나셨습니다.",
+                title="👋 멤버 퇴장 (관리 패널)",
+                description=f"**{member}** 님이 서버를 떠나셨습니다.\n관리자만 아래 버튼으로 즉시 제재할 수 있습니다.",
                 color=discord.Color.from_rgb(255, 118, 117),
                 timestamp=datetime.now(KST)
             )
             embed.set_thumbnail(url=member.display_avatar.url)
             embed.add_field(name="📌 퇴장 계정", value=f"`{member}`", inline=True)
+            embed.add_field(name="🔄 총 방문 횟수", value=f"총 **{join_count}회** 드나듦", inline=True)
             embed.add_field(name="👥 남은 서버 인원", value=f"`{member.guild.member_count:,}명`", inline=True)
             embed.set_footer(text=f"퇴장 시간: {now_time}")
             
             try:
-                await ch.send(embed=embed)
+                await ch.send(embed=embed, view=MemberModView(member.id))
             except Exception:
                 pass
 
@@ -486,7 +515,7 @@ class VerifyView(discord.ui.View):
         await interaction.response.send_modal(VerifyModal(random_code))
 
 # ---------------------------------------------------------------------------
-# 동적 알림 역할 버튼 UI & 전역 버튼 처리
+# 동적 알림 역할 버튼 UI & 전역 버튼 처리 (관리자 권한 검증 포함)
 # ---------------------------------------------------------------------------
 class DynamicNotificationButton(discord.ui.Button):
     def __init__(self, label: str, role_id: int):
@@ -503,6 +532,32 @@ async def on_interaction(interaction: discord.Interaction):
         data = getattr(interaction, "data", None) or {}
         custom_id = data.get("custom_id", "") if isinstance(data, dict) else getattr(data, "custom_id", "")
         
+        # 퇴장 로그 내보내기 버튼 처리 (관리자 및 판매자만 허용)
+        if custom_id.startswith("mod_kick_") or custom_id.startswith("mod_ban_"):
+            if not is_admin_or_seller(interaction):
+                await interaction.response.send_message("❌ 이 버튼은 관리자 권한을 가진 유저만 누할 수 있습니다.", ephemeral=True)
+                return
+
+            target_id = int(custom_id.split("_")[-1])
+            try:
+                user_obj = await bot.fetch_user(target_id)
+            except Exception:
+                user_obj = None
+
+            if custom_id.startswith("mod_kick_"):
+                try:
+                    await interaction.guild.kick(discord.Object(id=target_id), reason=f"로그 패널을 통한 관리자({interaction.user}) 추방")
+                    await interaction.response.send_message(f"🔨 성공적으로 해당 유저를 **추방(Kick)** 조치했습니다.", ephemeral=True)
+                except Exception as e:
+                    await interaction.response.send_message(f"❌ 추방 실패 (이미 나갔거나 권한 부족): {e}", ephemeral=True)
+            elif custom_id.startswith("mod_ban_"):
+                try:
+                    await interaction.guild.ban(discord.Object(id=target_id), reason=f"로그 패널을 통한 관리자({interaction.user}) 차단")
+                    await interaction.response.send_message(f"🚫 성공적으로 해당 유저를 **차단(Ban)** 조치했습니다.", ephemeral=True)
+                except Exception as e:
+                    await interaction.response.send_message(f"❌ 차단 실패 (권한 부족): {e}", ephemeral=True)
+            return
+
         if custom_id and custom_id.startswith("notif_role_"):
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
@@ -1199,7 +1254,7 @@ async def add_clear_button(interaction: discord.Interaction):
                 break
 
     if not target_msg:
-        await interaction.followup.send("❌ 이 채널에서 ``🔔 알림 역할 설정` 패널 메시지를 찾지 못했습니다.", ephemeral=True)
+        await interaction.followup.send("❌ 이 채널에서 `🔔 알림 역할 설정` 패널 메시지를 찾지 못했습니다.", ephemeral=True)
         return
 
     view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
