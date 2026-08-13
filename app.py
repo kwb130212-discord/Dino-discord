@@ -46,7 +46,7 @@ class GatedCommandTree(app_commands.CommandTree):
         # 자판기, 일정조회, 포인트조회 등 누구나/유저 공용으로 허용할 명령어 목록
         public_cmds = [
             "라이센스등록", "발로란트전적", "포인트조회", "내구매내역",
-            "구매하기", "판매하기", "일정목록"
+            "구매하기", "판매하기", "일정목록", "핑"
         ]
         if cmd_name in public_cmds:
             return True
@@ -213,7 +213,6 @@ def init_db():
             PRIMARY KEY (guild_id, user_id)
         )
     """)
-    # 📅 일정 설정 테이블
     cur.execute("""
         CREATE TABLE IF NOT EXISTS schedules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -393,6 +392,42 @@ def get_user_tier_info(guild_id: int, user_id: int) -> dict:
         "next_goal": "다음 등급: 🥉 **브론즈** (필요: 10,000원 또는 3회 구매)"
     }
 
+# ---------------------------------------------------------------------------
+# 🚪 입퇴장 로그 및 관리 패널 버튼 뷰
+# ---------------------------------------------------------------------------
+class KickBanView(discord.ui.View):
+    def __init__(self, member: discord.Member):
+        super().__init__(timeout=None)
+        self.member = member
+
+    @discord.ui.button(label="추방(Kick)", style=discord.ButtonStyle.danger, emoji="🔨", custom_id="mod_kick_btn")
+    async def kick_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.kick_members:
+            return await interaction.response.send_message("❌ 멤버를 추방할 권한이 없습니다.", ephemeral=True)
+        
+        try:
+            await self.member.kick(reason=f"관리자 패널을 통한 추방 (지시자: {interaction.user})")
+            await interaction.response.send_message(f"🔨 {self.member.name} 님을 서버에서 추방했습니다.", ephemeral=True)
+            for child in self.children:
+                child.disabled = True
+            await interaction.message.edit(view=self)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 추방 실패: {e}", ephemeral=True)
+
+    @discord.ui.button(label="차단(Ban)", style=discord.ButtonStyle.secondary, emoji="🚫", custom_id="mod_ban_btn")
+    async def ban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.ban_members:
+            return await interaction.response.send_message("❌ 멤버를 차단할 권한이 없습니다.", ephemeral=True)
+        
+        try:
+            await self.member.ban(reason=f"관리자 패널을 통한 차단 (지시자: {interaction.user})", delete_message_days=0)
+            await interaction.response.send_message(f"🚫 {self.member.name} 님을 서버에서 차단했습니다.", ephemeral=True)
+            for child in self.children:
+                child.disabled = True
+            await interaction.message.edit(view=self)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 차단 실패: {e}", ephemeral=True)
+
 @bot.event
 async def on_ready():
     init_db()
@@ -404,10 +439,11 @@ async def on_ready():
 
     try:
         synced = await bot.tree.sync()
-        print(f"슬래시 명령어 {len(synced)}개 동기화 완료")
+        command_count = len(synced)
+        print(f"✅ 로그인 완료: {bot.user}")
+        print(f"✅ /명령어 {command_count}개 가능")
     except Exception as e:
         print(f"명령어 동기화 실패: {e}")
-    print(f"✅ 로그인 완료: {bot.user}")
 
 @bot.command(name="강제동기화")
 async def force_resync(ctx: commands.Context):
@@ -418,21 +454,18 @@ async def force_resync(ctx: commands.Context):
 
     msg = await ctx.reply("🔄 명령어 초기화 및 재동기화 중...")
 
-    # 1) 글로벌 명령어 전체 초기화
     bot.tree.clear_commands(guild=None)
     await bot.tree.sync()
 
-    # 2) 현재 서버(길드) 기준으로 즉시 재등록 (길드 동기화는 전파가 즉시 이루어짐)
     if ctx.guild:
         bot.tree.copy_global_to(guild=ctx.guild)
         synced_guild = await bot.tree.sync(guild=ctx.guild)
-        await msg.edit(content=f"✅ 재동기화 완료! (이 서버 기준 {len(synced_guild)}개 명령어 즉시 반영)\n"
-                                f"디스코드 앱을 재시작하면 목록이 깔끔하게 갱신됩니다.")
+        await msg.edit(content=f"✅ 재동기화 완료! (이 서버 기준 {len(synced_guild)}개 명령어 즉시 반영)")
     else:
-        await msg.edit(content="✅ 글로벌 재동기화 완료! (전파까지 최대 1시간 소요될 수 있습니다)")
+        await msg.edit(content="✅ 글로벌 재동기화 완료!")
 
 # ---------------------------------------------------------------------------
-# 🛡️ 신규 유저 입장 검문 (안티 레이드)
+# 🛡️ 신규 유저 입장 검문 및 입퇴장 로그
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -460,6 +493,49 @@ async def on_member_join(member: discord.Member):
                         await ch.send(f"🚨 **[보안 차단]** 신규 유저 가입 방어: {member.mention} (계정 생성일 부족으로 자동 킥)")
             except Exception:
                 pass
+
+    # ✨입퇴장로그✨ 채널에 입장 메시지 출력
+    channel = discord.utils.get(member.guild.text_channels, name="✨입퇴장로그✨")
+    if channel:
+        now = datetime.now(KST)
+        time_str = now.strftime("%Y년 %m월 %d일 오후 %I시 %M분")
+        
+        embed = discord.Embed(color=discord.Color.green())
+        embed.description = (
+            f"📥 **가입 계정**\n"
+            f"`{member.name}`\n\n"
+            f"🔄 **방문 횟수**\n"
+            f"총 1번째 입장\n\n"
+            f"👤 **현재 서버 인원**\n"
+            f"`{member.guild.member_count}명`\n\n"
+            f"입장 시간: {time_str}"
+        )
+        await channel.send(embed=embed)
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    # ✨입퇴장로그✨ 채널에 퇴장 메시지 및 관리 패널 출력
+    channel = discord.utils.get(member.guild.text_channels, name="✨입퇴장로그✨")
+    if channel:
+        now = datetime.now(KST)
+        time_str = now.strftime("%Y년 %m월 %d일 오후 %I시 %M분")
+
+        embed = discord.Embed(color=discord.Color.red())
+        embed.title = "✨ 멤버 퇴장 (관리 패널)"
+        embed.description = (
+            f"{member.name} 님이 서버를 떠나셨습니다.\n"
+            f"관리자만 아래 버튼으로 즉시 제재할 수 있습니다.\n\n"
+            f"📌 **퇴장 계정**\n"
+            f"`{member.name}`\n\n"
+            f"🔄 **총 방문 횟수**\n"
+            f"총 1회 드나듦\n\n"
+            f"👤 **남은 서버 인원**\n"
+            f"`{member.guild.member_count}명`\n\n"
+            f"퇴장 시간: {time_str}"
+        )
+        
+        view = KickBanView(member)
+        await channel.send(embed=embed, view=view)
 
 class VerifyModal(discord.ui.Modal):
     def __init__(self, target_number: int):
@@ -556,6 +632,10 @@ async def on_interaction(interaction: discord.Interaction):
                     await interaction.followup.send("⚠️ 봇의 역할 순위가 낮아 역할을 부여할 수 없습니다.", ephemeral=False)
             return
 
+@bot.tree.command(name="핑", description="봇의 응답 속도를 확인합니다.")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(f"퐁! 🏓 지연시간: {round(bot.latency * 1000)}ms", ephemeral=False)
+
 @bot.command(name="서버등록")
 async def register_server(ctx: commands.Context, guild_id_str: str = None, days_str: str = None):
     if ctx.guild is None:
@@ -625,9 +705,6 @@ async def redeem_license(interaction: discord.Interaction, 라이센스키: str)
 
     await interaction.response.send_message(f"🎉 **라이센스 등록 완료!**\n만료일: `{exp_str}`", ephemeral=False)
 
-# ---------------------------------------------------------------------------
-# 📅 일정 설정 시스템
-# ---------------------------------------------------------------------------
 @bot.tree.command(name="일정등록", description="[관리자/판매자] 서버에 새로운 일정을 등록합니다.")
 @app_commands.describe(제목="일정 제목", 날짜="날짜 (예: 2026-08-15)", 설명="일정 상세 내용")
 @admin_or_seller_only()
@@ -659,9 +736,6 @@ async def list_schedules(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
-# ---------------------------------------------------------------------------
-# 📋 서버장 전용 서버 복사 시스템
-# ---------------------------------------------------------------------------
 @bot.tree.command(name="서버복사", description="[서버장 전용] 현재 서버의 채널 및 카테고리 구조를 새 서버로 복사합니다.")
 @app_commands.describe(대상서버id="복사해갈 대상 서버의 ID (봇이 들어가 있어야 함)")
 async def clone_server(interaction: discord.Interaction, 대상서버id: str):
