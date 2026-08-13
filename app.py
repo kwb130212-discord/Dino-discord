@@ -26,27 +26,27 @@ VERIFY_ROLE_NAME = os.getenv("VERIFY_ROLE_NAME", "인증유저")
 KST = timezone(timedelta(hours=9))
 
 intents = discord.Intents.default()
-intents.members = True          
-intents.message_content = True  
+intents.members = True
+intents.message_content = True
 
 class GatedCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild_id is None:
-            await interaction.response.send_message("이 봇은 서버 안에서만 사용할 수 있어요.", ephemeral=True)
+            await interaction.response.send_message("이 봇은 서버 안에서만 사용할 수 있어요.", ephemeral=False)
             return False
 
         # 블랙리스트 유저 차단 검사
         if is_user_blacklisted(interaction.guild_id, interaction.user.id):
-            await interaction.response.send_message("❌ 이 서버에서 차단(블랙리스트)된 유저입니다. 봇을 이용할 수 없습니다.", ephemeral=True)
+            await interaction.response.send_message("❌ 이 서버에서 차단(블랙리스트)된 유저입니다. 봇을 이용할 수 없습니다.", ephemeral=False)
             return False
 
         data = getattr(interaction, "data", None) or {}
         cmd_name = data.get("name") if isinstance(data, dict) else getattr(data, "name", None)
 
-        # 누구나/유저 공용으로 허용할 명령어 목록 (쇼핑, 전적 등)
+        # 자판기, 일정조회, 포인트조회 등 누구나/유저 공용으로 허용할 명령어 목록
         public_cmds = [
-            "라이센스등록", "발로란트전적", "포인트조회", "내구매내역", 
-            "랭킹", "구매하기", "판매하기", "일정목록"
+            "라이센스등록", "발로란트전적", "포인트조회", "내구매내역",
+            "구매하기", "판매하기", "일정목록"
         ]
         if cmd_name in public_cmds:
             return True
@@ -55,7 +55,7 @@ class GatedCommandTree(app_commands.CommandTree):
             await interaction.response.send_message(
                 "⚠️ 이 서버는 사용 승인이 되지 않았거나 라이센스가 만료되었습니다.\n"
                 "- 봇 개발자의 직인 승인(`!서버등록`) 또는 `/라이센스등록` 명령어를 이용해주세요.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return False
 
@@ -66,14 +66,14 @@ class GatedCommandTree(app_commands.CommandTree):
             custom_id = getattr(data, "custom_id", None)
 
         allowed_custom_ids = [
-            "btn_buy_standard", "btn_buy_custom", "btn_buy_role", 
+            "btn_buy_standard", "btn_buy_custom", "btn_buy_role",
             "btn_sell_standard", "btn_sell_custom", "btn_sell_role",
-            "vending_buy", "vending_products", "vending_charge", "vending_info", 
-            "select_category", "select_buy_item", "confirm_buy_item", 
-            "open_ticket", "close_ticket", "ticket_buy", "select_ticket_item", 
+            "vending_buy", "vending_products", "vending_charge", "vending_info",
+            "select_category", "select_buy_item", "confirm_buy_item",
+            "open_ticket", "close_ticket", "ticket_buy", "select_ticket_item",
             "verify_button"
         ]
-        
+
         if custom_id:
             if custom_id in allowed_custom_ids or custom_id.startswith("notif_role_") or custom_id.startswith("mod_kick_") or custom_id.startswith("mod_ban_"):
                 return True
@@ -82,7 +82,7 @@ class GatedCommandTree(app_commands.CommandTree):
             if not is_admin_or_seller(interaction):
                 await interaction.response.send_message(
                     "❌ 이 기능은 관리자 또는 등록된 판매자만 사용할 수 있어요.",
-                    ephemeral=True,
+                    ephemeral=False,
                 )
                 return False
 
@@ -98,7 +98,7 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-    
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS prices (
             guild_id INTEGER NOT NULL,
@@ -213,6 +213,7 @@ def init_db():
             PRIMARY KEY (guild_id, user_id)
         )
     """)
+    # 📅 일정 설정 테이블
     cur.execute("""
         CREATE TABLE IF NOT EXISTS schedules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -243,11 +244,11 @@ def is_guild_registered(guild_id: int) -> bool:
     conn.close()
     if not row:
         return False
-    
+
     expires_at_str = row["expires_at"]
     if expires_at_str is None:
         return True
-    
+
     exp_dt = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
     return datetime.now(KST) < exp_dt
 
@@ -255,8 +256,8 @@ def register_guild(guild_id: int, by_id: int, expires_at: str = None):
     conn = get_conn()
     conn.execute(
         """
-        INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at) 
-        VALUES (?, ?, ?, ?) 
+        INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(guild_id) DO UPDATE SET registered_by=?, registered_at=?, expires_at=?
         """,
         (guild_id, by_id, now_kst_str(), expires_at, by_id, now_kst_str(), expires_at),
@@ -318,7 +319,7 @@ def is_admin_or_seller(ctx_or_interaction) -> bool:
     else:
         guild_id = ctx_or_interaction.guild.id if ctx_or_interaction.guild else None
         user_id = ctx_or_interaction.author.id
-    
+
     if guild_id and is_bot_seller(guild_id, user_id):
         return True
     return False
@@ -327,7 +328,7 @@ def admin_or_seller_only():
     async def predicate(interaction: discord.Interaction) -> bool:
         if is_admin_or_seller(interaction):
             return True
-        await interaction.response.send_message("❌ 이 명령어는 관리자 또는 등록된 판매자만 사용할 수 있어요.", ephemeral=True)
+        await interaction.response.send_message("❌ 이 명령어는 관리자 또는 등록된 판매자만 사용할 수 있어요.", ephemeral=False)
         return False
     return app_commands.check(predicate)
 
@@ -409,7 +410,7 @@ async def on_ready():
     print(f"✅ 로그인 완료: {bot.user}")
 
 # ---------------------------------------------------------------------------
-# 🛡️ 안티 레이드 및 인증 시스템
+# 🛡️ 신규 유저 입장 검문 (안티 레이드)
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -461,15 +462,15 @@ class VerifyModal(discord.ui.Modal):
                 try:
                     await interaction.user.add_roles(role)
                     await interaction.response.send_message(
-                        f"✅ **인증 완료!** `{VERIFY_ROLE_NAME}` 역할을 받으셨습니다.", 
-                        ephemeral=True
+                        f"✅ **인증 완료!** `{VERIFY_ROLE_NAME}` 역할을 받으셨습니다.",
+                        ephemeral=False
                     )
                 except discord.Forbidden:
-                    await interaction.response.send_message("⚠️ 봇의 권한이 부족하여 역할을 부여할 수 없습니다.", ephemeral=True)
+                    await interaction.response.send_message("⚠️ 봇의 권한이 부족하여 역할을 부여할 수 없습니다.", ephemeral=False)
             else:
-                await interaction.response.send_message(f"⚠️ 서버에 `{VERIFY_ROLE_NAME}` 역할이 존재하지 않습니다.", ephemeral=True)
+                await interaction.response.send_message(f"⚠️ 서버에 `{VERIFY_ROLE_NAME}` 역할이 존재하지 않습니다.", ephemeral=False)
         else:
-            await interaction.response.send_message(f"❌ **인증 실패!** 입력하신 숫자가 일치하지 않습니다.", ephemeral=True)
+            await interaction.response.send_message(f"❌ **인증 실패!** 입력하신 숫자가 일치하지 않습니다.", ephemeral=False)
 
 class VerifyView(discord.ui.View):
     def __init__(self):
@@ -485,11 +486,11 @@ async def on_interaction(interaction: discord.Interaction):
     if interaction.type == discord.InteractionType.component:
         data = getattr(interaction, "data", None) or {}
         custom_id = data.get("custom_id", "") if isinstance(data, dict) else getattr(data, "custom_id", "")
-        
+
         if custom_id and custom_id.startswith("notif_role_"):
             if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            
+                await interaction.response.defer(ephemeral=False)
+
             if custom_id == "notif_role_clear_all":
                 removed_roles = []
                 if interaction.message and interaction.message.components:
@@ -505,37 +506,34 @@ async def on_interaction(interaction: discord.Interaction):
                                         removed_roles.append(role.mention)
                                     except discord.Forbidden:
                                         pass
-                
+
                 if removed_roles:
-                    await interaction.followup.send(f"🧹 알림 역할이 모두 제거되었습니다: {', '.join(removed_roles)}", ephemeral=True)
+                    await interaction.followup.send(f"🧹 알림 역할이 모두 제거되었습니다: {', '.join(removed_roles)}", ephemeral=False)
                 else:
-                    await interaction.followup.send("🧹 제거할 알림 역할이 없습니다.", ephemeral=True)
+                    await interaction.followup.send("🧹 제거할 알림 역할이 없습니다.", ephemeral=False)
                 return
 
             role_id = int(custom_id.replace("notif_role_", ""))
             role = interaction.guild.get_role(role_id)
-            
+
             if not role:
-                await interaction.followup.send("❌ 부여할 역할을 서버에서 찾을 수 없습니다.", ephemeral=True)
+                await interaction.followup.send("❌ 부여할 역할을 서버에서 찾을 수 없습니다.", ephemeral=False)
                 return
 
             if role in interaction.user.roles:
                 try:
                     await interaction.user.remove_roles(role)
-                    await interaction.followup.send(f"🔕 {role.mention} 역할이 **해제**되었습니다.", ephemeral=True)
+                    await interaction.followup.send(f"🔕 {role.mention} 역할이 **해제**되었습니다.", ephemeral=False)
                 except discord.Forbidden:
-                    await interaction.followup.send("⚠️ 봇의 역할 순위가 낮아 역할을 해제할 수 없습니다.", ephemeral=True)
+                    await interaction.followup.send("⚠️ 봇의 역할 순위가 낮아 역할을 해제할 수 없습니다.", ephemeral=False)
             else:
                 try:
                     await interaction.user.add_roles(role)
-                    await interaction.followup.send(f"🔔 {role.mention} 역할이 **부여**되었습니다!", ephemeral=True)
+                    await interaction.followup.send(f"🔔 {role.mention} 역할이 **부여**되었습니다!", ephemeral=False)
                 except discord.Forbidden:
-                    await interaction.followup.send("⚠️ 봇의 역할 순위가 낮아 역할을 부여할 수 없습니다.", ephemeral=True)
+                    await interaction.followup.send("⚠️ 봇의 역할 순위가 낮아 역할을 부여할 수 없습니다.", ephemeral=False)
             return
 
-# ---------------------------------------------------------------------------
-# 🔑 서버 등록 및 라이센스 명령어
-# ---------------------------------------------------------------------------
 @bot.command(name="서버등록")
 async def register_server(ctx: commands.Context, guild_id_str: str = None, days_str: str = None):
     if ctx.guild is None:
@@ -555,7 +553,7 @@ async def register_server(ctx: commands.Context, guild_id_str: str = None, days_
 @app_commands.describe(일수="유효 기간(일 단위)")
 async def create_license(interaction: discord.Interaction, 일수: int):
     if not await bot.is_owner(interaction.user):
-        await interaction.response.send_message("❌ 이 명령어는 봇 개발자만 사용할 수 있습니다.", ephemeral=True)
+        await interaction.response.send_message("❌ 이 명령어는 봇 개발자만 사용할 수 있습니다.", ephemeral=False)
         return
 
     key = generate_license_key()
@@ -564,13 +562,13 @@ async def create_license(interaction: discord.Interaction, 일수: int):
     conn.commit()
     conn.close()
 
-    await interaction.response.send_message(f"🔑 **라이센스 키 발급 완료**\n- 키: `{key}`\n- 유효기간: **{일수}일**", ephemeral=True)
+    await interaction.response.send_message(f"🔑 **라이센스 키 발급 완료**\n- 키: `{key}`\n- 유효기간: **{일수}일**", ephemeral=False)
 
 @bot.tree.command(name="라이센스등록", description="발급받은 라이센스 키를 통해 서버 사용 권한을 활성화합니다.")
 @app_commands.describe(라이센스키="발급받은 라이센스 키")
 async def redeem_license(interaction: discord.Interaction, 라이센스키: str):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ 서버 관리자만 라이센스를 등록할 수 있습니다.", ephemeral=True)
+        await interaction.response.send_message("❌ 서버 관리자만 라이센스를 등록할 수 있습니다.", ephemeral=False)
         return
 
     key = 라이센스키.strip()
@@ -579,7 +577,7 @@ async def redeem_license(interaction: discord.Interaction, 라이센스키: str)
 
     if not lic or lic["is_used"]:
         conn.close()
-        await interaction.response.send_message("❌ 올바르지 않거나 이미 사용된 라이센스 키입니다.", ephemeral=True)
+        await interaction.response.send_message("❌ 올바르지 않거나 이미 사용된 라이센스 키입니다.", ephemeral=False)
         return
 
     duration = lic["duration_days"]
@@ -603,10 +601,10 @@ async def redeem_license(interaction: discord.Interaction, 라이센스키: str)
     conn.commit()
     conn.close()
 
-    await interaction.response.send_message(f"🎉 **라이센스 등록 완료!**\n만료일: `{exp_str}`", ephemeral=True)
+    await interaction.response.send_message(f"🎉 **라이센스 등록 완료!**\n만료일: `{exp_str}`", ephemeral=False)
 
 # ---------------------------------------------------------------------------
-# 📅 일정 및 서버 관리 설정 명령어
+# 📅 일정 설정 시스템
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="일정등록", description="[관리자/판매자] 서버에 새로운 일정을 등록합니다.")
 @app_commands.describe(제목="일정 제목", 날짜="날짜 (예: 2026-08-15)", 설명="일정 상세 내용")
@@ -619,7 +617,7 @@ async def add_schedule(interaction: discord.Interaction, 제목: str, 날짜: st
     )
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"📅 **일정 등록 완료**\n- 제목: **{제목}**\n- 날짜: `{날짜}`\n- 내용: {설명}", ephemeral=True)
+    await interaction.response.send_message(f"📅 **일정 등록 완료**\n- 제목: **{제목}**\n- 날짜: `{날짜}`\n- 내용: {설명}", ephemeral=False)
 
 @bot.tree.command(name="일정목록", description="등록된 서버 일정 목록을 확인합니다.")
 async def list_schedules(interaction: discord.Interaction):
@@ -628,7 +626,7 @@ async def list_schedules(interaction: discord.Interaction):
     conn.close()
 
     if not rows:
-        return await interaction.response.send_message("📅 등록된 서버 일정이 없습니다.", ephemeral=True)
+        return await interaction.response.send_message("📅 등록된 서버 일정이 없습니다.", ephemeral=False)
 
     embed = discord.Embed(title="🗓️ 서버 일정 목록", color=discord.Color.blue())
     for r in rows:
@@ -637,24 +635,27 @@ async def list_schedules(interaction: discord.Interaction):
             value=f"{r['description']}",
             inline=False
         )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
+# ---------------------------------------------------------------------------
+# 📋 서버장 전용 서버 복사 시스템
+# ---------------------------------------------------------------------------
 @bot.tree.command(name="서버복사", description="[서버장 전용] 현재 서버의 채널 및 카테고리 구조를 새 서버로 복사합니다.")
 @app_commands.describe(대상서버id="복사해갈 대상 서버의 ID (봇이 들어가 있어야 함)")
 async def clone_server(interaction: discord.Interaction, 대상서버id: str):
     if interaction.guild.owner_id != interaction.user.id and not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("❌ 이 명령어는 **서버 소유자(서버장)**만 실행할 수 있습니다.", ephemeral=True)
+        return await interaction.response.send_message("❌ 이 명령어는 **서버 소유자(서버장)**만 실행할 수 있습니다.", ephemeral=False)
 
     try:
         target_guild_id = int(대상서버id)
     except ValueError:
-        return await interaction.response.send_message("❌ 올바른 서버 ID(숫자)를 입력해주세요.", ephemeral=True)
+        return await interaction.response.send_message("❌ 올바른 서버 ID(숫자)를 입력해주세요.", ephemeral=False)
 
     target_guild = bot.get_guild(target_guild_id)
     if not target_guild:
-        return await interaction.response.send_message("❌ 대상 서버를 찾을 수 없습니다. (봇이 대상 서버에 초대되어 있는지 확인하세요.)", ephemeral=True)
+        return await interaction.response.send_message("❌ 대상 서버를 찾을 수 없습니다. (봇이 대상 서버에 초대되어 있는지 확인하세요.)", ephemeral=False)
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
 
     try:
         source_guild = interaction.guild
@@ -669,7 +670,7 @@ async def clone_server(interaction: discord.Interaction, 대상서버id: str):
         for channel in source_guild.channels:
             if isinstance(channel, discord.CategoryChannel):
                 continue
-            
+
             target_category = category_map.get(channel.category_id) if channel.category_id else None
 
             if isinstance(channel, discord.TextChannel):
@@ -690,9 +691,9 @@ async def clone_server(interaction: discord.Interaction, 대상서버id: str):
                     position=channel.position
                 )
 
-        await interaction.followup.send(f"✅ 성공적으로 [{source_guild.name}] 서버의 구조가 [{target_guild.name}] 서버로 복사되었습니다!", ephemeral=True)
+        await interaction.followup.send(f"✅ 성공적으로 [{source_guild.name}] 서버의 채널 및 구조가 [{target_guild.name}] 서버로 복사되었습니다!", ephemeral=False)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ 서버 복사 중 오류가 발생했습니다: {e}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ 서버 복사 중 오류가 발생했습니다: {e}", ephemeral=False)
 
 @bot.tree.command(name="영수증채널설정", description="[관리자/판매자] 구매 영수증이 출력될 채널을 지정합니다.")
 @app_commands.describe(채널="영수증 메시지가 전송될 텍스트 채널")
@@ -705,9 +706,9 @@ async def set_receipt_channel(interaction: discord.Interaction, 채널: discord.
     )
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ 구매 영수증 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=True)
+    await interaction.response.send_message(f"✅ 구매 영수증 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=False)
 
-@bot.tree.command(name="제재로그설정", description="[관리자] 보안 감사 로그가 출력될 채널을 지정합니다.")
+@bot.tree.command(name="제재로그설정", description="[관리자] 킥/밴 등의 보안 감사 로그가 출력될 채널을 지정합니다.")
 @app_commands.describe(채널="로그가 전송될 텍스트 채널")
 @admin_or_seller_only()
 async def set_audit_channel(interaction: discord.Interaction, 채널: discord.TextChannel):
@@ -718,9 +719,9 @@ async def set_audit_channel(interaction: discord.Interaction, 채널: discord.Te
     )
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ 보안 제재 로그 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=True)
+    await interaction.response.send_message(f"✅ 보안 제재 로그 채널이 {채널.mention} (으)로 설정되었습니다.", ephemeral=False)
 
-@bot.tree.command(name="블랙리스트추가", description="[관리자] 차단할 유저를 등록합니다.")
+@bot.tree.command(name="블랙리스트추가", description="[관리자] 봇 사용 및 서버 접근을 차단할 유저를 등록합니다.")
 @app_commands.describe(유저="차단할 유저 멘션", 사유="차단 사유")
 @admin_or_seller_only()
 async def add_blacklist(interaction: discord.Interaction, 유저: discord.Member, 사유: str = "사유 없음"):
@@ -731,37 +732,34 @@ async def add_blacklist(interaction: discord.Interaction, 유저: discord.Member
     )
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"🚨 {유저.mention}님을 블랙리스트에 등록했습니다. (사유: {사유})", ephemeral=True)
+    await interaction.response.send_message(f"🚨 {유저.mention}님을 블랙리스트에 등록했습니다. (사유: {사유})", ephemeral=False)
 
-@bot.tree.command(name="블랙리스트해제", description="[관리자] 블랙리스트 유저를 해제합니다.")
+@bot.tree.command(name="블랙리스트해제", description="[관리자] 블랙리스트에 등록된 유저를 해제합니다.")
 @app_commands.describe(유저ID="해제할 유저의 ID")
 @admin_or_seller_only()
 async def remove_blacklist(interaction: discord.Interaction, 유저ID: str):
     try:
         u_id = int(유저ID)
     except ValueError:
-        return await interaction.response.send_message("❌ 올바른 유저 ID(숫자)를 입력해주세요.", ephemeral=True)
+        return await interaction.response.send_message("❌ 올바른 유저 ID(숫자)를 입력해주세요.", ephemeral=False)
 
     conn = get_conn()
     conn.execute("DELETE FROM blacklists WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, u_id))
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ 유저 ID `{u_id}`님의 블랙리스트를 해제했습니다.", ephemeral=True)
+    await interaction.response.send_message(f"✅ 유저 ID `{u_id}`님의 블랙리스트를 해제했습니다.", ephemeral=False)
 
-@bot.tree.command(name="판매자등록", description="[관리자] 특정 유저에게 판매자 권한을 부여합니다.")
-@app_commands.describe(유저="판매자로 등록할 유저 멘션")
+@bot.tree.command(name="판매자등록", description="[관리자] 특정 유저에게 패널 및 상품 관리 권한을 부여합니다.")
+@app_commands.describe(유저="판매자로 등록할 유저 멘션 (@유저)")
 async def register_seller(interaction: discord.Interaction, 유저: discord.Member):
     if not is_admin(interaction):
-        await interaction.response.send_message("❌ 이 명령어는 서버 관리자만 실행할 수 있습니다.", ephemeral=True)
+        await interaction.response.send_message("❌ 이 명령어는 서버 관리자만 실행할 수 있습니다.", ephemeral=False)
         return
 
     add_bot_seller(interaction.guild_id, 유저.id, interaction.user.id)
-    await interaction.response.send_message(f"✅ {유저.mention}님을 **판매자**로 등록했습니다.", ephemeral=True)
+    await interaction.response.send_message(f"✅ {유저.mention}님을 **판매자**로 등록했습니다.", ephemeral=False)
 
-# ---------------------------------------------------------------------------
-# 🛒 상품 및 포인트 관리 명령어
-# ---------------------------------------------------------------------------
-@bot.tree.command(name="일반등록", description="[관리자/판매자] 일반 자판기 상품 및 재고를 추가합니다.")
+@bot.tree.command(name="일반등록", description="[관리자/판매자] 일반 자판기 상품 등록 및 1회성 재고를 추가합니다.")
 @app_commands.describe(상품명="상품 이름", 가격="상품 가격(원)", 재고내용="DM으로 발송될 핀코드/계정 등")
 @admin_or_seller_only()
 async def add_standard_stock(interaction: discord.Interaction, 상품명: str, 가격: int, 재고내용: str):
@@ -777,9 +775,9 @@ async def add_standard_stock(interaction: discord.Interaction, 상품명: str, �
     conn.commit()
     conn.close()
 
-    await interaction.response.send_message(f"✅ **[일반]** `{상품명}` (`{fmt_won(가격)}`) 재고가 추가되었습니다. (남은 재고: **{stock_count}개**)", ephemeral=True)
+    await interaction.response.send_message(f"✅ **[일반]** `{상품명}` (`{fmt_won(가격)}`) 재고가 추가되었습니다. (남은 재고: **{stock_count}개**)", ephemeral=False)
 
-@bot.tree.command(name="커스텀등록", description="[관리자/판매자] 커스텀 자판기 상품을 등록합니다.")
+@bot.tree.command(name="커스텀등록", description="[관리자/판매자] 커스텀 자판기 상품(고정 메시지/다운로드 링크)을 등록합니다.")
 @app_commands.describe(상품명="상품 이름", 가격="상품 가격(원)", 발송내용="DM으로 발송할 고정 안내문/링크")
 @admin_or_seller_only()
 async def register_custom(interaction: discord.Interaction, 상품명: str, 가격: int, 발송내용: str):
@@ -796,7 +794,7 @@ async def register_custom(interaction: discord.Interaction, 상품명: str, 가�
     conn.commit()
     conn.close()
 
-    await interaction.response.send_message(f"✅ **[커스텀]** `{상품명}` (`{fmt_won(가격)}`) 상품이 등록되었습니다.", ephemeral=True)
+    await interaction.response.send_message(f"✅ **[커스텀]** `{상품명}` (`{fmt_won(가격)}`) 상품이 등록되었습니다.", ephemeral=False)
 
 @bot.tree.command(name="역할등록", description="[관리자/판매자] 역할 지급 자판기 상품을 등록합니다.")
 @app_commands.describe(상품명="상품 이름", 가격="상품 가격(원)", 부여역할="지급할 디스코드 역할")
@@ -811,10 +809,10 @@ async def register_role(interaction: discord.Interaction, 상품명: str, 가격
     conn.commit()
     conn.close()
 
-    await interaction.response.send_message(f"✅ **[역할]** `{상품명}` (`{fmt_won(가격)}`, 역할: {부여역할.mention}) 상품이 등록되었습니다.", ephemeral=True)
+    await interaction.response.send_message(f"✅ **[역할]** `{상품명}` (`{fmt_won(가격)}`, 역할: {부여역할.mention}) 상품이 등록되었습니다.", ephemeral=False)
 
-@bot.tree.command(name="수동충전", description="[관리자/판매자] 특정 유저의 포인트를 수동 충전합니다.")
-@app_commands.describe(유저="대상 유저 멘션", 금액="충전할 금액(원)")
+@bot.tree.command(name="수동충전", description="[관리자/판매자] 특정 유저의 포인트를 수동으로 충전해줍니다.")
+@app_commands.describe(유저="대상 유저 멘션 (@유저)", 금액="충전할 금액(원)")
 @admin_or_seller_only()
 async def manual_charge(interaction: discord.Interaction, 유저: discord.Member, 금액: int):
     conn = get_conn()
@@ -825,13 +823,13 @@ async def manual_charge(interaction: discord.Interaction, 유저: discord.Member
     conn.commit()
     conn.close()
     current_total = get_user_points(interaction.guild_id, 유저.id)
-    await interaction.response.send_message(f"✅ {유저.mention}님에게 **{fmt_won(금액)}** 수동 충전 완료 (잔액: {fmt_won(current_total)})", ephemeral=True)
+    await interaction.response.send_message(f"✅ {유저.mention}님에게 **{fmt_won(금액)}** 수동 충전 완료 (잔액: {fmt_won(current_total)})", ephemeral=False)
 
 @bot.tree.command(name="포인트조회", description="내 남은 포인트 잔액 및 VIP 등급을 확인합니다.")
 async def check_my_points(interaction: discord.Interaction):
     pts = get_user_points(interaction.guild_id, interaction.user.id)
     tier_info = get_user_tier_info(interaction.guild_id, interaction.user.id)
-    
+
     disc_percent = int(tier_info["discount_rate"] * 100)
     status_str = f"{tier_info['icon']} **{tier_info['name']}** ({disc_percent}% 할인 혜택)"
 
@@ -844,7 +842,7 @@ async def check_my_points(interaction: discord.Interaction):
                     f"💡 {tier_info['next_goal']}",
         color=discord.Color.gold()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
 @bot.tree.command(name="내구매내역", description="최근 구매한 상품 내역을 확인합니다.")
 async def check_my_transactions(interaction: discord.Interaction):
@@ -856,7 +854,7 @@ async def check_my_transactions(interaction: discord.Interaction):
     conn.close()
 
     if not rows:
-        await interaction.response.send_message("📦 최근 구매 내역이 없습니다.", ephemeral=True)
+        await interaction.response.send_message("📦 최근 구매 내역이 없습니다.", ephemeral=False)
         return
 
     embed = discord.Embed(title="📜 최근 구매 내역 (최근 5건)", color=discord.Color.blurple())
@@ -866,11 +864,8 @@ async def check_my_transactions(interaction: discord.Interaction):
             value=f"• 결제 금액: `{fmt_won(r['total_price'])}` | 일시: `{r['created_at']}`",
             inline=False
         )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
-# ---------------------------------------------------------------------------
-# 🎮 외부 API 연동 (발로란트 전적)
-# ---------------------------------------------------------------------------
 @bot.tree.command(name="발로란트전적", description="발로란트 유저의 티어 및 최근 전적을 검색합니다.")
 @app_commands.describe(닉네임="발로란트 닉네임", 태그="태그 (예: KR1)")
 async def valorant_stats(interaction: discord.Interaction, 닉네임: str, 태그: str):
@@ -880,7 +875,7 @@ async def valorant_stats(interaction: discord.Interaction, 닉네임: str, 태�
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
-                return await interaction.followup.send("❌ 유저를 찾을 수 없습니다.")
+                return await interaction.followup.send("❌ 유저를 찾을 수 없습니다.", ephemeral=False)
             data = await resp.json()
     try:
         acc = data.get("data", {})
@@ -892,20 +887,17 @@ async def valorant_stats(interaction: discord.Interaction, 닉네임: str, 태�
         curr = mmr_data.get("data", {}).get("current_data", {})
         embed = discord.Embed(title=f"🎮 발로란트: {닉네임}#{clean_tag}", color=discord.Color.from_rgb(255, 70, 85))
         embed.add_field(name="🏆 현재 티어", value=f"**{curr.get('currenttierpatched', 'Unranked')}** ({curr.get('ranking_in_tier', 0)} RR)")
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=False)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ 오류 발생: {e}")
+        await interaction.followup.send(f"⚠️ 오류 발생: {e}", ephemeral=False)
 
-# ---------------------------------------------------------------------------
-# 🛒 자판기 구매 처리 로직 및 뷰
-# ---------------------------------------------------------------------------
 async def process_purchase(interaction: discord.Interaction, item_name: str, quantity: int, total_price: int, memo_text: str = "자판기 구매"):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
 
     my_pts = get_user_points(guild_id, user_id)
     if my_pts < total_price:
-        await interaction.response.send_message(f"❌ 잔액이 부족합니다! (내 잔액: {fmt_won(my_pts)}, 필요 금액: {fmt_won(total_price)})", ephemeral=True)
+        await interaction.response.send_message(f"❌ 잔액이 부족합니다! (내 잔액: {fmt_won(my_pts)}, 필요 금액: {fmt_won(total_price)})", ephemeral=False)
         return
 
     conn = get_conn()
@@ -913,7 +905,7 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
 
     if not item_info:
         conn.close()
-        await interaction.response.send_message("⚠️ 존재하지 않는 상품입니다.", ephemeral=True)
+        await interaction.response.send_message("⚠️ 존재하지 않는 상품입니다.", ephemeral=False)
         return
 
     target_type = item_info["target_type"]
@@ -924,7 +916,7 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
         stock_rows = conn.execute("SELECT * FROM item_stocks WHERE guild_id = ? AND item = ? AND is_used = 0 LIMIT ?", (guild_id, item_name, quantity)).fetchall()
         if len(stock_rows) < quantity:
             conn.close()
-            await interaction.response.send_message("❌ 처리 도중 재고가 부족해졌습니다.", ephemeral=True)
+            await interaction.response.send_message("❌ 처리 도중 재고가 부족해졌습니다.", ephemeral=False)
             return
 
         account_contents = []
@@ -940,7 +932,7 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
         perm_row = conn.execute("SELECT content FROM permanent_stocks WHERE guild_id = ? AND item = ?", (guild_id, item_name)).fetchone()
         if not perm_row:
             conn.close()
-            await interaction.response.send_message("⚠️ 안내문 내용이 등록되지 않았습니다.", ephemeral=True)
+            await interaction.response.send_message("⚠️ 안내문 내용이 등록되지 않았습니다.", ephemeral=False)
             return
         combined_accounts = perm_row["content"]
 
@@ -948,12 +940,12 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
         role = interaction.guild.get_role(role_id)
         if not role:
             conn.close()
-            await interaction.response.send_message("❌ 부여할 역할을 서버에서 찾을 수 없습니다.", ephemeral=True)
+            await interaction.response.send_message("❌ 부여할 역할을 서버에서 찾을 수 없습니다.", ephemeral=False)
             return
 
         if role in interaction.user.roles:
             conn.close()
-            await interaction.response.send_message("⚠️ 이미 가지고 있는 역할입니다.", ephemeral=True)
+            await interaction.response.send_message("⚠️ 이미 가지고 있는 역할입니다.", ephemeral=False)
             return
 
         try:
@@ -961,7 +953,7 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
             combined_accounts = f"🎉 {role.name} 역할이 정상적으로 부여되었습니다."
         except discord.Forbidden:
             conn.close()
-            await interaction.response.send_message("❌ 권한 오류: 봇 역할의 순위가 지급할 역할보다 위에 있어야 합니다.", ephemeral=True)
+            await interaction.response.send_message("❌ 권한 오류: 봇 역할의 순위가 지급할 역할보다 위에 있어야 합니다.", ephemeral=False)
             return
 
     conn.execute("UPDATE user_points SET points = points - ? WHERE guild_id = ? AND user_id = ?", (total_price, guild_id, user_id))
@@ -1019,7 +1011,7 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
     else:
         msg += "\n📬 상세 정보가 DM으로 발송되었습니다."
 
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.response.send_message(msg, ephemeral=False)
 
 class BuyVendingView(discord.ui.View):
     def __init__(self):
@@ -1032,12 +1024,12 @@ class BuyVendingView(discord.ui.View):
         conn.close()
 
         if not rows:
-            return await interaction.response.send_message("❌ 구매 가능한 일반 상품(재고 있음)이 없습니다.", ephemeral=True)
+            return await interaction.response.send_message("❌ 구매 가능한 일반 상품(재고 있음)이 없습니다.", ephemeral=False)
 
         options = [discord.SelectOption(label=r['item'], description=f"가격: {fmt_won(r['price'])} | 재고: {r['stock']}개", value=r['item']) for r in rows]
         view = discord.ui.View()
         view.add_item(VendingItemSelect(options))
-        await interaction.response.send_message("📦 구매할 일반 상품을 선택해주세요:", view=view, ephemeral=True)
+        await interaction.response.send_message("📦 구매할 일반 상품을 선택해주세요:", view=view, ephemeral=False)
 
     @discord.ui.button(label="🎨 커스텀 상품 구매", style=discord.ButtonStyle.success, custom_id="btn_buy_custom")
     async def custom_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1046,12 +1038,12 @@ class BuyVendingView(discord.ui.View):
         conn.close()
 
         if not rows:
-            return await interaction.response.send_message("❌ 등록된 커스텀 상품이 없습니다.", ephemeral=True)
+            return await interaction.response.send_message("❌ 등록된 커스텀 상품이 없습니다.", ephemeral=False)
 
         options = [discord.SelectOption(label=r['item'], description=f"가격: {fmt_won(r['price'])}", value=r['item']) for r in rows]
         view = discord.ui.View()
         view.add_item(VendingItemSelect(options))
-        await interaction.response.send_message("🎨 구매할 커스텀 상품을 선택해주세요:", view=view, ephemeral=True)
+        await interaction.response.send_message("🎨 구매할 커스텀 상품을 선택해주세요:", view=view, ephemeral=False)
 
     @discord.ui.button(label="👑 역할 상품 구매", style=discord.ButtonStyle.secondary, custom_id="btn_buy_role")
     async def role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1060,12 +1052,12 @@ class BuyVendingView(discord.ui.View):
         conn.close()
 
         if not rows:
-            return await interaction.response.send_message("❌ 등록된 역할 상품이 없습니다.", ephemeral=True)
+            return await interaction.response.send_message("❌ 등록된 역할 상품이 없습니다.", ephemeral=False)
 
         options = [discord.SelectOption(label=r['item'], description=f"가격: {fmt_won(r['price'])}", value=r['item']) for r in rows]
         view = discord.ui.View()
         view.add_item(VendingItemSelect(options))
-        await interaction.response.send_message("👑 구매할 역할 상품을 선택해주세요:", view=view, ephemeral=True)
+        await interaction.response.send_message("👑 구매할 역할 상품을 선택해주세요:", view=view, ephemeral=False)
 
 class SellVendingView(discord.ui.View):
     def __init__(self):
@@ -1073,15 +1065,15 @@ class SellVendingView(discord.ui.View):
 
     @discord.ui.button(label="📦 일반 상품 판매 등록", style=discord.ButtonStyle.primary, custom_id="btn_sell_standard")
     async def sell_standard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("💡 일반 상품 판매 등록은 `/일반등록` 명령어를 이용해주세요.", ephemeral=True)
+        await interaction.response.send_message("💡 일반 상품 판매 등록은 `/일반등록` 명령어를 이용해주세요.", ephemeral=False)
 
     @discord.ui.button(label="🎨 커스텀 상품 판매 등록", style=discord.ButtonStyle.success, custom_id="btn_sell_custom")
     async def sell_custom_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("💡 커스텀 상품 판매 등록은 `/커스텀등록` 명령어를 이용해주세요.", ephemeral=True)
+        await interaction.response.send_message("💡 커스텀 상품 판매 등록은 `/커스텀등록` 명령어를 이용해주세요.", ephemeral=False)
 
     @discord.ui.button(label="👑 역할 상품 판매 등록", style=discord.ButtonStyle.secondary, custom_id="btn_sell_role")
     async def sell_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("💡 역할 상품 판매 등록은 `/역할등록` 명령어를 이용해주세요.", ephemeral=True)
+        await interaction.response.send_message("💡 역할 상품 판매 등록은 `/역할등록` 명령어를 이용해주세요.", ephemeral=False)
 
 class VendingItemSelect(discord.ui.Select):
     def __init__(self, options):
@@ -1107,7 +1099,7 @@ class QuantityModal(discord.ui.Modal, title="🧮 수량 선택 및 결제 확�
     async def on_submit(self, interaction: discord.Interaction):
         raw_val = self.quantity_input.value.strip()
         if not raw_val.isdigit() or int(raw_val) <= 0:
-            await interaction.response.send_message("❌ 올바른 숫자를 입력해주세요!", ephemeral=True)
+            await interaction.response.send_message("❌ 올바른 숫자를 입력해주세요!", ephemeral=False)
             return
 
         qty = int(raw_val)
@@ -1116,7 +1108,7 @@ class QuantityModal(discord.ui.Modal, title="🧮 수량 선택 및 결제 확�
         conn.close()
 
         if not item_row:
-            await interaction.response.send_message("⚠️ 존재하지 않는 상품입니다.", ephemeral=True)
+            await interaction.response.send_message("⚠️ 존재하지 않는 상품입니다.", ephemeral=False)
             return
 
         unit_price = item_row["price"]
@@ -1125,7 +1117,7 @@ class QuantityModal(discord.ui.Modal, title="🧮 수량 선택 및 결제 확�
         target_type = item_row["target_type"]
 
         if target_type == "standard" and stock < qty:
-            await interaction.response.send_message(f"❌ 재고가 부족합니다! (남은 재고: {stock}개)", ephemeral=True)
+            await interaction.response.send_message(f"❌ 재고가 부족합니다! (남은 재고: {stock}개)", ephemeral=False)
             return
 
         tier_info = get_user_tier_info(interaction.guild_id, interaction.user.id)
@@ -1157,7 +1149,7 @@ class QuantityModal(discord.ui.Modal, title="🧮 수량 선택 및 결제 확�
             color=discord.Color.green()
         )
         view = VendingConfirmView(self.item_name, qty, final_total_price)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
 class VendingConfirmView(discord.ui.View):
     def __init__(self, item_name: str, quantity: int, total_price: int):
@@ -1170,9 +1162,6 @@ class VendingConfirmView(discord.ui.View):
     async def confirm_purchase(self, interaction: discord.Interaction, button: discord.ui.Button):
         await process_purchase(interaction, self.item_name, self.quantity, self.total_price, memo_text="구매 자판기 거래")
 
-# ---------------------------------------------------------------------------
-# 🎫 티켓 시스템
-# ---------------------------------------------------------------------------
 class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1188,7 +1177,7 @@ class TicketPanelView(discord.ui.View):
             ch = guild.get_channel(existing["channel_id"])
             if ch:
                 conn.close()
-                await interaction.response.send_message(f"⚠️ 이미 생성된 티켓 채널이 있습니다: {ch.mention}", ephemeral=True)
+                await interaction.response.send_message(f"⚠️ 이미 생성된 티켓 채널이 있습니다: {ch.mention}", ephemeral=False)
                 return
 
         overwrites = {
@@ -1210,7 +1199,7 @@ class TicketPanelView(discord.ui.View):
             color=discord.Color.blue()
         )
         await ticket_channel.send(content=f"{user.mention} 님, 티켓이 생성되었습니다.", embed=embed, view=TicketControlView())
-        await interaction.response.send_message(f"✅ 티켓 채널이 생성되었습니다: {ticket_channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ 티켓 채널이 생성되었습니다: {ticket_channel.mention}", ephemeral=False)
 
 class TicketControlView(discord.ui.View):
     def __init__(self):
@@ -1221,7 +1210,7 @@ class TicketControlView(discord.ui.View):
         channel_id = interaction.channel_id
         conn = get_conn()
         t_row = conn.execute("SELECT * FROM ticket_logs WHERE channel_id = ?", (channel_id,)).fetchone()
-        
+
         owner_id = t_row["owner_id"] if t_row else interaction.user.id
         conn.execute("DELETE FROM ticket_logs WHERE channel_id = ?", (channel_id,))
         conn.commit()
@@ -1230,7 +1219,7 @@ class TicketControlView(discord.ui.View):
         guild = interaction.guild
         member = guild.get_member(owner_id)
 
-        await interaction.response.send_message("📢 **티켓이 종료되어 30분 동안 자동 타임아웃이 적용됩니다.**", ephemeral=False)
+        await interaction.response.send_message("📢 **티켓이 종료되어 30분 동안 자동 타임아웃이 적용됩니다.**")
 
         if member:
             try:
@@ -1244,10 +1233,7 @@ class TicketControlView(discord.ui.View):
         except Exception:
             pass
 
-# ---------------------------------------------------------------------------
-# 🎛️ 패널 생성 명령어
-# ---------------------------------------------------------------------------
-@bot.tree.command(name="구매패널", description="[관리자/판매자] 상품 구매 전용 패널을 생성합니다.")
+@bot.tree.command(name="구매패널", description="[관리자/판매자] 현재 채널에 상품 구매(사고) 전용 패널을 생성합니다.")
 @admin_or_seller_only()
 async def spawn_buy_vending_machine(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -1261,20 +1247,24 @@ async def spawn_buy_vending_machine(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     embed.set_footer(text="원활한 수령을 위해 DM 수신 허용 상태를 확인하세요.")
-    
-    await interaction.channel.send(embed=embed, view=BuyVendingView())
-    await interaction.response.send_message("✅ 구매 패널이 성공적으로 생성되었습니다.", ephemeral=True)
 
-@bot.tree.command(name="판매패널", description="[관리자/판매자] 상품 판매 등록 안내 패널을 생성합니다.")
+    await interaction.channel.send(embed=embed, view=BuyVendingView())
+    await interaction.response.send_message("✅ 구매 패널이 성공적으로 생성되었습니다.", ephemeral=False)
+
+@bot.tree.command(name="판매패널", description="[관리자/판매자] 현재 채널에 상품 판매(팔고) 안내 전용 패널을 생성합니다.")
 @admin_or_seller_only()
 async def spawn_sell_vending_machine(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🏷️ 상품 판매 등록 센터",
-        description="상점에 상품을 등록하거나 판매를 원하실 경우 아래 버튼을 참고해주세요.",
+        description=(
+            "상점에 상품을 등록하거나 판매를 원하실 경우 아래 버튼을 참고해주세요.\n\n"
+            "💡 관리자/판매자 권한을 통해 명령어로 상품을 등록할 수 있습니다."
+        ),
         color=discord.Color.gold()
     )
+
     await interaction.channel.send(embed=embed, view=SellVendingView())
-    await interaction.response.send_message("✅ 판매 패널이 성공적으로 생성되었습니다.", ephemeral=True)
+    await interaction.response.send_message("✅ 판매 패널이 성공적으로 생성되었습니다.", ephemeral=False)
 
 @bot.tree.command(name="티켓패널", description="[관리자/판매자] 티켓 패널을 전송합니다.")
 @admin_or_seller_only()
@@ -1286,7 +1276,7 @@ async def ticket_panel(interaction: discord.Interaction):
         color=discord.Color.green()
     )
     await interaction.channel.send(embed=embed, view=TicketPanelView())
-    await interaction.response.send_message("✅ 티켓 패널이 생성되었습니다.", ephemeral=True)
+    await interaction.response.send_message("✅ 티켓 패널이 생성되었습니다.", ephemeral=False)
 
 @bot.tree.command(name="인증패널", description="[관리자/판매자] 보안 회원 인증 패널을 전송합니다.")
 @admin_or_seller_only()
@@ -1298,7 +1288,7 @@ async def verify_panel(interaction: discord.Interaction):
         color=discord.Color.green()
     )
     await interaction.channel.send(embed=embed, view=VerifyView())
-    await interaction.response.send_message("✅ 인증 패널이 생성되었습니다.", ephemeral=True)
+    await interaction.response.send_message("✅ 인증 패널이 생성되었습니다.", ephemeral=False)
 
 if __name__ == "__main__":
     if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
