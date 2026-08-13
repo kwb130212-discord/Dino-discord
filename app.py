@@ -38,7 +38,7 @@ class GatedCommandTree(app_commands.CommandTree):
         data = getattr(interaction, "data", None) or {}
         cmd_name = data.get("name") if isinstance(data, dict) else getattr(data, "name", None)
 
-        if cmd_name in ["라이센스등록", "발로란트전적", "검강화", "내검정보", "주사위도박", "코인토스", "포인트조회", "내구매내역", "하락방지권구매", "보스레이드", "랭킹"]:
+        if cmd_name in ["라이센스등록", "발로란트전적", "검강화", "내검정보", "주사위도박", "코인토스", "포인트조회", "내구매내역", "하락방지권구매", "랭킹", "구매하기", "판매하기"]:
             return True
 
         if not is_guild_registered(interaction.guild_id):
@@ -56,10 +56,12 @@ class GatedCommandTree(app_commands.CommandTree):
             custom_id = getattr(data, "custom_id", None)
 
         allowed_custom_ids = [
-            "btn_standard", "btn_custom", "btn_role", "vending_buy", "vending_products", 
-            "vending_charge", "vending_info", "select_category", "select_buy_item", 
-            "confirm_buy_item", "open_ticket", "close_ticket", "ticket_buy", 
-            "select_ticket_item", "verify_button", "sword_enhance"
+            "btn_buy_standard", "btn_buy_custom", "btn_buy_role", 
+            "btn_sell_standard", "btn_sell_custom", "btn_sell_role",
+            "vending_buy", "vending_products", "vending_charge", "vending_info", 
+            "select_category", "select_buy_item", "confirm_buy_item", 
+            "open_ticket", "close_ticket", "ticket_buy", "select_ticket_item", 
+            "verify_button", "sword_enhance"
         ]
         
         if custom_id:
@@ -138,7 +140,6 @@ def init_db():
             guild_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             protect_ticket INTEGER DEFAULT 0,
-            chance_ticket INTEGER DEFAULT 0,
             PRIMARY KEY (guild_id, user_id)
         )
     """)
@@ -205,14 +206,6 @@ def init_db():
             guild_id INTEGER NOT NULL,
             owner_id INTEGER NOT NULL,
             opened_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_join_counts (
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            join_count INTEGER DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
         )
     """)
 
@@ -381,7 +374,8 @@ def get_user_tier_info(guild_id: int, user_id: int) -> dict:
 @bot.event
 async def on_ready():
     init_db()
-    bot.add_view(MainVendingView())
+    bot.add_view(BuyVendingView())
+    bot.add_view(SellVendingView())
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(VerifyView())
@@ -435,11 +429,6 @@ class VerifyView(discord.ui.View):
     async def verify_button_click(self, interaction: discord.Interaction, button: discord.ui.Button):
         random_code = random.randint(1000, 9999)
         await interaction.response.send_modal(VerifyModal(random_code))
-
-class DynamicNotificationButton(discord.ui.Button):
-    def __init__(self, label: str, role_id: int):
-        super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=f"notif_role_{role_id}")
-        self.role_id = role_id
 
 class ClearAllNotificationButton(discord.ui.Button):
     def __init__(self):
@@ -642,19 +631,6 @@ async def register_role(interaction: discord.Interaction, 상품명: str, 가격
 
     await interaction.response.send_message(f"✅ **[역할]** `{상품명}` (`{fmt_won(가격)}`, 역할: {부여역할.mention}) 상품이 등록되었습니다.", ephemeral=False)
 
-@bot.tree.command(name="상품등록", description="[관리자/판매자] 상점에 새로운 상품을 등록합니다.")
-@app_commands.describe(카테고리="상품 카테고리", 상품명="상품 이름", 가격="상품 가격", 재고="재고 개수 (-1 시 무제한)")
-@admin_or_seller_only()
-async def register_product(interaction: discord.Interaction, 카테고리: str, 상품명: str, 가격: int, 재고: int = -1):
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO prices (guild_id, item, category, price, stock) VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id, item) DO UPDATE SET category = ?, price = ?, stock = ?",
-        (interaction.guild_id, 상품명, 카테고리, 가격, 재고, 카테고리, 가격, 재고)
-    )
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ 상품 **[{카테고리}] {상품명}** (가격: {fmt_won(가격)}, 재고: {재고})이(가) 등록되었습니다.", ephemeral=False)
-
 @bot.tree.command(name="수동충전", description="[관리자/판매자] 특정 유저의 포인트를 수동으로 충전해줍니다.")
 @app_commands.describe(유저="대상 유저 멘션 (@유저)", 금액="충전할 금액(원)")
 @admin_or_seller_only()
@@ -668,19 +644,6 @@ async def manual_charge(interaction: discord.Interaction, 유저: discord.Member
     conn.close()
     current_total = get_user_points(interaction.guild_id, 유저.id)
     await interaction.response.send_message(f"✅ {유저.mention}님에게 **{fmt_won(금액)}** 수동 충전 완료 (잔액: {fmt_won(current_total)})", ephemeral=False)
-
-@bot.tree.command(name="포인트지급", description="[관리자/판매자] 유저에게 포인트를 지급합니다.")
-@app_commands.describe(유저="지급할 유저", 금액="지급할 포인트")
-@admin_or_seller_only()
-async def give_points(interaction: discord.Interaction, 유저: discord.Member, 금액: int):
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO user_points (guild_id, user_id, points) VALUES (?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET points = points + ?",
-        (interaction.guild_id, 유저.id, 금액, 금액)
-    )
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ {유저.mention}님께 {fmt_won(금액)}을(를) 지급했습니다.", ephemeral=False)
 
 @bot.tree.command(name="포인트조회", description="내 남은 포인트 잔액 및 VIP 등급을 확인합니다.")
 async def check_my_points(interaction: discord.Interaction):
@@ -779,7 +742,7 @@ async def server_ranking(interaction: discord.Interaction, 종류: str):
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
 # ---------------------------------------------------------------------------
-# ⚔️ 검 강화 및 관련 아이템 시스템 (확률 5%씩 감소, 하락방지권, 보스 레이드)
+# ⚔️ 검 강화 및 하락방지권 시스템 (보스 레이드 제거 완료)
 # ---------------------------------------------------------------------------
 SWORD_NAMES = {
     0: "녹슨 단검", 1: "철검", 2: "기사 대검", 3: "화염의 검", 4: "서릿발 검",
@@ -807,53 +770,17 @@ async def buy_protect_ticket(interaction: discord.Interaction):
     conn.execute("UPDATE user_points SET points = points - ? WHERE guild_id = ? AND user_id = ?", (cost, guild_id, user_id))
     conn.execute(
         """
-        INSERT INTO user_items (guild_id, user_id, protect_ticket, chance_ticket) 
-        VALUES (?, ?, 1, 0) 
+        INSERT INTO user_items (guild_id, user_id, protect_ticket) 
+        VALUES (?, ?, 1) 
         ON CONFLICT(guild_id, user_id) DO UPDATE SET protect_ticket = protect_ticket + 1
         """,
         (guild_id, user_id)
     )
-    row = conn.execute("SELECT protect_ticket, chance_ticket FROM user_items WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
+    row = conn.execute("SELECT protect_ticket FROM user_items WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
     conn.commit()
     conn.close()
 
     await interaction.response.send_message(f"🛡️ **강화 하락 방지권 구매 완료!**\n- 소모 비용: `{fmt_won(cost)}`\n- 보유 중인 하락 방지권: **{row['protect_ticket']}개**", ephemeral=False)
-
-@bot.tree.command(name="보스레이드", description="보스에 도전하여 승리 시 강화 확률 업권(또는 보상)을 획득합니다!")
-async def boss_raid(interaction: discord.Interaction):
-    guild_id = interaction.guild_id
-    user_id = interaction.user.id
-
-    success = random.choice([True, False])
-
-    conn = get_conn()
-    if success:
-        conn.execute(
-            """
-            INSERT INTO user_items (guild_id, user_id, protect_ticket, chance_ticket) 
-            VALUES (?, ?, 0, 1) 
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET chance_ticket = chance_ticket + 1
-            """,
-            (guild_id, user_id)
-        )
-        row = conn.execute("SELECT protect_ticket, chance_ticket FROM user_items WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
-        conn.commit()
-        conn.close()
-
-        embed = discord.Embed(
-            title="⚔️ 보스 레이드 성공!",
-            description=f"거대한 보스를 물리치고 승리했습니다!\n\n🎁 **보상:** 강화 확률 업권 +1개 획득!\n📦 보유 중인 확률 업권: **{row['chance_ticket']}개**",
-            color=discord.Color.green()
-        )
-    else:
-        conn.close()
-        embed = discord.Embed(
-            title="💀 보스 레이드 실패...",
-            description="보스의 강력한 공격에 밀려 패배했습니다... 다음 기회에 다시 도전해보세요!",
-            color=discord.Color.red()
-        )
-
-    await interaction.response.send_message(embed=embed, ephemeral=False)
 
 class SwordEnhanceView(discord.ui.View):
     def __init__(self):
@@ -879,18 +806,10 @@ class SwordEnhanceView(discord.ui.View):
             conn.close()
             return await interaction.response.send_message(f"❌ 포인트가 부족합니다! (필요 포인트: {fmt_won(cost)}, 내 잔액: {fmt_won(pts)})", ephemeral=False)
 
-        user_item = conn.execute("SELECT protect_ticket, chance_ticket FROM user_items WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
+        user_item = conn.execute("SELECT protect_ticket FROM user_items WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
         protect_ticket = user_item["protect_ticket"] if user_item else 0
-        chance_ticket = user_item["chance_ticket"] if user_item else 0
 
-        base_chance = get_enhance_chance(current_level)
-        bonus_chance = 0
-
-        if chance_ticket > 0:
-            bonus_chance = 20
-            conn.execute("UPDATE user_items SET chance_ticket = chance_ticket - 1 WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-
-        total_chance = min(100, base_chance + bonus_chance)
+        total_chance = get_enhance_chance(current_level)
         roll = random.randint(1, 100)
 
         conn.execute("UPDATE user_points SET points = points - ? WHERE guild_id = ? AND user_id = ?", (cost, guild_id, user_id))
@@ -909,7 +828,7 @@ class SwordEnhanceView(discord.ui.View):
                 description=f"축하합니다! 검 강화에 **성공**했습니다.\n\n"
                             f"• 기존: `+{current_level} {SWORD_NAMES.get(current_level, '검')}`\n"
                             f"• 현재: `+{new_level} {SWORD_NAMES.get(new_level, '검')}`\n"
-                            f"• 소모 비용: `{fmt_won(cost)}`" + (f"\n✨ 확률 업권 사용 (+20% 적용)" if bonus_chance > 0 else ""),
+                            f"• 소모 비용: `{fmt_won(cost)}`",
                 color=discord.Color.green()
             )
             await interaction.response.send_message(embed=embed, ephemeral=False)
@@ -952,12 +871,11 @@ async def my_sword_info(interaction: discord.Interaction):
     user_id = interaction.user.id
     conn = get_conn()
     sword = conn.execute("SELECT level FROM user_swords WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
-    user_item = conn.execute("SELECT protect_ticket, chance_ticket FROM user_items WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
+    user_item = conn.execute("SELECT protect_ticket FROM user_items WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
     conn.close()
 
     lvl = sword["level"] if sword else 0
     protect_t = user_item["protect_ticket"] if user_item else 0
-    chance_t = user_item["chance_ticket"] if user_item else 0
 
     cost = get_enhance_cost(lvl) if lvl < 10 else 0
     chance = get_enhance_chance(lvl) if lvl < 10 else 0
@@ -968,8 +886,7 @@ async def my_sword_info(interaction: discord.Interaction):
                     f"• **다음 강화 비용:** `{fmt_won(cost)}`\n"
                     f"• **다음 단계 성공 확률:** `{chance}%` (레벨당 -5% 적용)\n\n"
                     f"🎒 **보유 아이템:**\n"
-                    f"• 🛡️ 강화 하락 방지권: **{protect_t}개** (`/하락방지권구매`로 100만원에 구매 가능)\n"
-                    f"• 🎫 강화 확률 업권: **{chance_t}개** (`/보스레이드` 토벌 성공 시 획득)",
+                    f"• 🛡️ 강화 하락 방지권: **{protect_t}개** (`/하락방지권구매`로 100만원에 구매 가능)",
         color=discord.Color.orange()
     )
     await interaction.response.send_message(embed=embed, ephemeral=False, view=SwordEnhanceView())
@@ -1206,11 +1123,14 @@ async def process_purchase(interaction: discord.Interaction, item_name: str, qua
 
     await interaction.response.send_message(msg, ephemeral=False)
 
-class MainVendingView(discord.ui.View):
+# ---------------------------------------------------------------------------
+# 🛒 구매 전용 패널 (사고)
+# ---------------------------------------------------------------------------
+class BuyVendingView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="📦 일반 자판기", style=discord.ButtonStyle.primary, custom_id="btn_standard")
+    @discord.ui.button(label="📦 일반 상품 구매", style=discord.ButtonStyle.primary, custom_id="btn_buy_standard")
     async def standard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         conn = get_conn()
         rows = conn.execute("SELECT * FROM prices WHERE guild_id = ? AND target_type = 'standard' AND stock > 0", (interaction.guild_id,)).fetchall()
@@ -1224,7 +1144,7 @@ class MainVendingView(discord.ui.View):
         view.add_item(VendingItemSelect(options))
         await interaction.response.send_message("📦 구매할 일반 상품을 선택해주세요:", view=view, ephemeral=False)
 
-    @discord.ui.button(label="🎨 커스텀 자판기", style=discord.ButtonStyle.success, custom_id="btn_custom")
+    @discord.ui.button(label="🎨 커스텀 상품 구매", style=discord.ButtonStyle.success, custom_id="btn_buy_custom")
     async def custom_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         conn = get_conn()
         rows = conn.execute("SELECT * FROM prices WHERE guild_id = ? AND target_type = 'custom'", (interaction.guild_id,)).fetchall()
@@ -1236,9 +1156,9 @@ class MainVendingView(discord.ui.View):
         options = [discord.SelectOption(label=r['item'], description=f"가격: {fmt_won(r['price'])}", value=r['item']) for r in rows]
         view = discord.ui.View()
         view.add_item(VendingItemSelect(options))
-        await interaction.response.send_message("🎨 발송받을 커스텀 상품을 선택해주세요:", view=view, ephemeral=False)
+        await interaction.response.send_message("🎨 구매할 커스텀 상품을 선택해주세요:", view=view, ephemeral=False)
 
-    @discord.ui.button(label="👑 역할 자판기", style=discord.ButtonStyle.secondary, custom_id="btn_role")
+    @discord.ui.button(label="👑 역할 상품 구매", style=discord.ButtonStyle.secondary, custom_id="btn_buy_role")
     async def role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         conn = get_conn()
         rows = conn.execute("SELECT * FROM prices WHERE guild_id = ? AND target_type = 'role'", (interaction.guild_id,)).fetchall()
@@ -1250,7 +1170,26 @@ class MainVendingView(discord.ui.View):
         options = [discord.SelectOption(label=r['item'], description=f"가격: {fmt_won(r['price'])}", value=r['item']) for r in rows]
         view = discord.ui.View()
         view.add_item(VendingItemSelect(options))
-        await interaction.response.send_message("👑 획득할 역할 상품을 선택해주세요:", view=view, ephemeral=False)
+        await interaction.response.send_message("👑 구매할 역할 상품을 선택해주세요:", view=view, ephemeral=False)
+
+# ---------------------------------------------------------------------------
+# 🏷️ 판매 전용 패널 (팔고)
+# ---------------------------------------------------------------------------
+class SellVendingView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📦 일반 상품 판매 등록", style=discord.ButtonStyle.primary, custom_id="btn_sell_standard")
+    async def sell_standard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("💡 일반 상품 판매 등록은 `/일반등록` 명령어를 이용해주세요.", ephemeral=False)
+
+    @discord.ui.button(label="🎨 커스텀 상품 판매 등록", style=discord.ButtonStyle.success, custom_id="btn_sell_custom")
+    async def sell_custom_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("💡 커스텀 상품 판매 등록은 `/커스텀등록` 명령어를 이용해주세요.", ephemeral=False)
+
+    @discord.ui.button(label="👑 역할 상품 판매 등록", style=discord.ButtonStyle.secondary, custom_id="btn_sell_role")
+    async def sell_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("💡 역할 상품 판매 등록은 `/역할등록` 명령어를 이용해주세요.", ephemeral=False)
 
 class VendingItemSelect(discord.ui.Select):
     def __init__(self, options):
@@ -1337,7 +1276,7 @@ class VendingConfirmView(discord.ui.View):
 
     @discord.ui.button(label="✅ 최종 구매 확정", style=discord.ButtonStyle.danger, custom_id="confirm_buy_item")
     async def confirm_purchase(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await process_purchase(interaction, self.item_name, self.quantity, self.total_price, memo_text="통합 자판기 구매")
+        await process_purchase(interaction, self.item_name, self.quantity, self.total_price, memo_text="구매 자판기 거래")
 
 class TicketPanelView(discord.ui.View):
     def __init__(self):
@@ -1410,23 +1349,41 @@ class TicketControlView(discord.ui.View):
         except Exception:
             pass
 
-@bot.tree.command(name="자판기생성", description="[관리자/판매자] 현재 채널에 통합 자판기 메인 패널을 생성합니다.")
+# ---------------------------------------------------------------------------
+# 📌 명령어: 구매패널 / 판매패널 생성
+# ---------------------------------------------------------------------------
+@bot.tree.command(name="구매패널", description="[관리자/판매자] 현재 채널에 상품 구매(사고) 전용 패널을 생성합니다.")
 @admin_or_seller_only()
-async def spawn_vending_machine(interaction: discord.Interaction):
+async def spawn_buy_vending_machine(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🏪 통합 자판기 센터",
+        title="🛒 상품 구매 센터",
         description=(
-            "원하시는 자판기 유형의 버튼을 누른 후, 드롭다운 메뉴에서 상품을 선택해주세요.\n\n"
-            "📦 **일반 자판기**: 차감형 상품 (코드, 계정 등)\n"
-            "🎨 **커스텀 자판기**: 고정 안내문/다운로드 링크 수령\n"
-            "👑 **역할 자판기**: 서버 전용 역할 즉시 획득"
+            "원하시는 상품 유형의 버튼을 누른 후, 드롭다운 메뉴에서 구매를 진행해주세요.\n\n"
+            "📦 **일반 상품**: 차감형 상품 (코드, 계정 등)\n"
+            "🎨 **커스텀 상품**: 고정 안내문/다운로드 링크 수령\n"
+            "👑 **역할 상품**: 서버 전용 역할 즉시 획득"
         ),
         color=discord.Color.blue()
     )
     embed.set_footer(text="원활한 수령을 위해 DM 수신 허용 상태를 확인하세요.")
     
-    await interaction.channel.send(embed=embed, view=MainVendingView())
-    await interaction.response.send_message("✅ 자판기 패널이 성공적으로 생성되었습니다.", ephemeral=False)
+    await interaction.channel.send(embed=embed, view=BuyVendingView())
+    await interaction.response.send_message("✅ 구매 패널이 성공적으로 생성되었습니다.", ephemeral=False)
+
+@bot.tree.command(name="판매패널", description="[관리자/판매자] 현재 채널에 상품 판매(팔고) 안내 전용 패널을 생성합니다.")
+@admin_or_seller_only()
+async def spawn_sell_vending_machine(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🏷️ 상품 판매 등록 센터",
+        description=(
+            "상점에 상품을 등록하거나 판매를 원하실 경우 아래 버튼을 참고해주세요.\n\n"
+            "💡 관리자/판매자 권한을 통해 명령어로 상품을 등록할 수 있습니다."
+        ),
+        color=discord.Color.gold()
+    )
+    
+    await interaction.channel.send(embed=embed, view=SellVendingView())
+    await interaction.response.send_message("✅ 판매 패널이 성공적으로 생성되었습니다.", ephemeral=False)
 
 @bot.tree.command(name="티켓패널", description="[관리자/판매자] 티켓 패널을 전송합니다.")
 @admin_or_seller_only()
@@ -1451,68 +1408,6 @@ async def verify_panel(interaction: discord.Interaction):
     )
     await interaction.channel.send(embed=embed, view=VerifyView())
     await interaction.response.send_message("✅ 인증 패널이 생성되었습니다.", ephemeral=False)
-
-@bot.tree.command(name="알림패널생성", description="[관리자/판매자] 기본 알림 설정 패널을 생성합니다.")
-@admin_or_seller_only()
-async def create_notification_panel(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    embed = discord.Embed(
-        title="🔔 알림 역할 설정",
-        description="받으실 알림을 눌러주세요\n____________________",
-        color=discord.Color.gold()
-    )
-    view = discord.ui.View(timeout=None)
-    
-    await interaction.channel.send(embed=embed, view=view)
-    await interaction.followup.send("✅ 알림 패널이 생성되었습니다!", ephemeral=False)
-
-@bot.tree.command(name="알림버튼추가", description="[관리자/판매자] 채널의 가장 마지막 알림 패널에 역할 버튼을 추가합니다.")
-@app_commands.describe(버튼이름="버튼에 표시될 이름", 지급역할="지급할 역할(@역할)")
-@admin_or_seller_only()
-async def add_notification_button(interaction: discord.Interaction, 버튼이름: str, 지급역할: discord.Role):
-    await interaction.response.defer(ephemeral=False)
-    
-    target_msg = None
-    async for message in interaction.channel.history(limit=20):
-        if message.author == bot.user and message.embeds:
-            if "알림 역할 설정" in message.embeds[0].title:
-                target_msg = message
-                break
-
-    if not target_msg:
-        await interaction.followup.send("❌ 이 채널에서 `🔔 알림 역할 설정` 패널 메시지를 찾지 못했습니다. 패널을 먼저 생성해주세요.", ephemeral=False)
-        return
-
-    view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
-    view.timeout = None
-    view.add_item(DynamicNotificationButton(label=버튼이름, role_id=지급역할.id))
-    
-    await target_msg.edit(view=view)
-    await interaction.followup.send(f"✅ 가장 최근 알림 패널에 **[{버튼이름}]** ({지급역할.mention}) 버튼이 추가되었습니다!", ephemeral=False)
-
-@bot.tree.command(name="핑지우개버튼추가", description="[관리자/판매자] 채널의 가장 마지막 알림 패널에 핑지우개 버튼을 추가합니다.")
-@admin_or_seller_only()
-async def add_clear_button(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    target_msg = None
-    async for message in interaction.channel.history(limit=20):
-        if message.author == bot.user and message.embeds:
-            if "알림 역할 설정" in message.embeds[0].title:
-                target_msg = message
-                break
-
-    if not target_msg:
-        await interaction.followup.send("❌ 이 채널에서 `🔔 알림 역할 설정` 패널 메시지를 찾지 못했습니다.", ephemeral=False)
-        return
-
-    view = discord.ui.View.from_message(target_msg) if target_msg.components else discord.ui.View(timeout=None)
-    view.timeout = None
-    view.add_item(ClearAllNotificationButton())
-    
-    await target_msg.edit(view=view)
-    await interaction.followup.send("✅ 가장 최근 알림 패널에 **🧹 핑지우개** 버튼이 추가되었습니다!", ephemeral=False)
 
 if __name__ == "__main__":
     if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
