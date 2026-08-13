@@ -409,6 +409,28 @@ async def on_ready():
         print(f"명령어 동기화 실패: {e}")
     print(f"✅ 로그인 완료: {bot.user}")
 
+@bot.command(name="강제동기화")
+async def force_resync(ctx: commands.Context):
+    """[개발자 전용] 옛날 슬래시 명령어 캐시를 지우고 현재 코드 기준으로 완전히 재등록합니다."""
+    if not await bot.is_owner(ctx.author):
+        await ctx.reply("❌ 이 명령어는 봇 개발자만 사용할 수 있습니다.")
+        return
+
+    msg = await ctx.reply("🔄 명령어 초기화 및 재동기화 중...")
+
+    # 1) 글로벌 명령어 전체 초기화
+    bot.tree.clear_commands(guild=None)
+    await bot.tree.sync()
+
+    # 2) 현재 서버(길드) 기준으로 즉시 재등록 (길드 동기화는 전파가 즉시 이루어짐)
+    if ctx.guild:
+        bot.tree.copy_global_to(guild=ctx.guild)
+        synced_guild = await bot.tree.sync(guild=ctx.guild)
+        await msg.edit(content=f"✅ 재동기화 완료! (이 서버 기준 {len(synced_guild)}개 명령어 즉시 반영)\n"
+                                f"디스코드 앱을 재시작하면 목록이 깔끔하게 갱신됩니다.")
+    else:
+        await msg.edit(content="✅ 글로벌 재동기화 완료! (전파까지 최대 1시간 소요될 수 있습니다)")
+
 # ---------------------------------------------------------------------------
 # 🛡️ 신규 유저 입장 검문 (안티 레이드)
 # ---------------------------------------------------------------------------
