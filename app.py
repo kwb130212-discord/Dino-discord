@@ -44,13 +44,13 @@ class GatedCommandTree(app_commands.CommandTree):
         all_user_commands = [
             "라이센스등록", "발로란트전적", "포인트조회", "내구매내역", "출석체크", 
             "내정보", "출금신청", "송금하기", "상점목록", "상품검색", 
-            "건의하기", "출석현황", "버프확인", "상품등록", "포인트지급", 
-            "포인트차감", "관리자등록", "판매자등록", "재고수정", "서버정보", 
-            "공지발송", "역할지급", "청소하기"
+            "건의하기", "출석현황", "버프확인", "인증패널전송", "상품등록", 
+            "포인트지급", "포인트차감", "관리자등록", "판매자등록", "재고수정", 
+            "서버정보", "공지발송", "역할지급", "청소하기"
         ]
 
         if cmd_name in all_user_commands:
-            admin_or_seller_cmds = ["상품등록", "포인트지급", "포인트차감", "관리자등록", "판매자등록", "재고수정", "공지발송", "역할지급", "청소하기"]
+            admin_or_seller_cmds = ["인증패널전송", "상품등록", "포인트지급", "포인트차감", "관리자등록", "판매자등록", "재고수정", "공지발송", "역할지급", "청소하기"]
             if cmd_name not in admin_or_seller_cmds:
                 return True
 
@@ -72,7 +72,7 @@ class GatedCommandTree(app_commands.CommandTree):
             "btn_standard", "btn_custom", "btn_role", "vending_buy", "vending_products", 
             "vending_charge", "vending_info", "select_category", "select_buy_item", 
             "confirm_buy_item", "open_ticket", "close_ticket", "ticket_buy", 
-            "select_ticket_item", "verify_button"
+            "select_ticket_item", "verify_button", "verify_modal_submit"
         ]
         
         if custom_id:
@@ -286,8 +286,38 @@ def get_user_points(guild_id: int, user_id: int) -> int:
     return row["points"] if row else 0
 
 # ---------------------------------------------------------------------------
-# UI Views (자판기 구매 시 갠톡(DM)으로 안내하도록 수정)
+# UI Views (자판기 갠톡 연동 및 4자리 인증 모달 포함)
 # ---------------------------------------------------------------------------
+class VerifyModal(discord.ui.Modal, title="라이벌 BEST클랜 회원 인증"):
+    code_input = discord.ui.TextInput(
+        label="4자리 인증 번호 입력",
+        placeholder="화면에 안내된 4자리 숫자를 입력하세요",
+        min_length=4,
+        max_length=4,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        entered_code = self.code_input.value
+        # 간단한 4자리 숫자 검증 로직 (원하는 검증 규칙으로 변경 가능합니다)
+        if entered_code.isdigit() and len(entered_code) == 4:
+            role = discord.utils.get(interaction.guild.roles, name=VERIFY_ROLE_NAME)
+            if role and isinstance(interaction.user, discord.Member):
+                await interaction.user.add_roles(role)
+                await interaction.response.send_message(f"✅ 인증이 완료되었습니다! `{VERIFY_ROLE_NAME}` 역할이 지급되었습니다.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ 서버에서 `{VERIFY_ROLE_NAME}` 역할을 찾을 수 없습니다. 관리자에게 문의하세요.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ 올바른 4자리 숫자를 입력해주세요.", ephemeral=True)
+
+class VerifyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="인증하기 🔓", style=discord.ButtonStyle.green, custom_id="verify_button")
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyModal())
+
 class MainVendingView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -337,7 +367,6 @@ class MainVendingView(discord.ui.View):
                 c.commit()
                 c.close()
                 
-                # 채널에는 간결하게 확인 메시지만 띄우고, 실제 상세 내역은 갠톡(DM)으로 발송
                 await i.response.send_message("✅ 구매가 완료되었습니다! 상세 내역을 개인 메시지(DM)로 전송해 드렸습니다.", ephemeral=True)
                 
                 try:
@@ -351,7 +380,7 @@ class MainVendingView(discord.ui.View):
                     dm_embed.add_field(name="남은 포인트", value=fmt_won(get_user_points(i.guild.id, i.user.id)), inline=True)
                     await i.user.send(embed=dm_embed)
                 except Exception:
-                    pass  # DM이 막혀있는 경우 예외 처리
+                    pass
 
             item_select.callback = item_callback
             item_view.add_item(item_select)
@@ -397,23 +426,10 @@ class TicketControlView(discord.ui.View):
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("🔒 티켓을 종료합니다.", ephemeral=True)
 
-class VerifyView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    @discord.ui.button(label="✅ 인증하기", style=discord.ButtonStyle.green, custom_id="verify_button")
-    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        role = discord.utils.get(interaction.guild.roles, name=VERIFY_ROLE_NAME)
-        if role and isinstance(interaction.user, discord.Member):
-            await interaction.user.add_roles(role)
-            await interaction.response.send_message("✅ 인증이 완료되었습니다!", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ 인증 역할을 찾을 수 없습니다.", ephemeral=True)
-
 # ---------------------------------------------------------------------------
-# 🎮 슬래시 명령어 정의 (게임 제거 버전)
+# 슬래시 명령어 정의
 # ---------------------------------------------------------------------------
 
-# 1. 라이센스등록
 @bot.tree.command(name="라이센스등록", description="라이센스 키를 입력하여 서버 이용 권한을 등록합니다.")
 @app_commands.describe(라이센스키="발급받은 라이센스 키")
 async def register_license(interaction: discord.Interaction, 라이센스키: str):
@@ -435,7 +451,6 @@ async def register_license(interaction: discord.Interaction, 라이센스키: st
     conn.close()
     await interaction.response.send_message(f"🎉 라이센스 등록이 완료되었습니다! (이용 기간: {days}일, 만료일: {expires_at})", ephemeral=True)
 
-# 2. 발로란트전적
 @bot.tree.command(name="발로란트전적", description="발로란트 유저의 티어 및 최근 전적을 검색합니다.")
 @app_commands.describe(닉네임="발로란트 닉네임", 태그="태그 (예: KR1)")
 async def valorant_stats(interaction: discord.Interaction, 닉네임: str, 태그: str):
@@ -461,13 +476,11 @@ async def valorant_stats(interaction: discord.Interaction, 닉네임: str, 태�
     except Exception as e:
         await interaction.followup.send(f"⚠️ 오류 발생: {e}")
 
-# 3. 포인트조회
 @bot.tree.command(name="포인트조회", description="내 남은 포인트 잔액을 확인합니다.")
 async def check_my_points(interaction: discord.Interaction):
     pts = get_user_points(interaction.guild_id, interaction.user.id)
     await interaction.response.send_message(f"💰 내 포인트 잔액: **{fmt_won(pts)}**", ephemeral=True)
 
-# 4. 내구매내역
 @bot.tree.command(name="내구매내역", description="내가 구매한 상품들의 내역을 확인합니다.")
 async def my_purchases(interaction: discord.Interaction):
     conn = get_conn()
@@ -480,7 +493,6 @@ async def my_purchases(interaction: discord.Interaction):
         embed.add_field(name=r["item"], value=f"가격: {fmt_won(r['total_price'])} | 일시: {r['created_at']}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 5. 출석체크
 @bot.tree.command(name="출석체크", description="매일 출석체크를 하고 포인트를 받으세요!")
 async def daily_attendance(interaction: discord.Interaction):
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
@@ -496,7 +508,6 @@ async def daily_attendance(interaction: discord.Interaction):
     conn.close()
     await interaction.response.send_message(f"✅ 출석체크 완료! 보상: **{fmt_won(reward)}**", ephemeral=True)
 
-# 6. 내정보
 @bot.tree.command(name="내정보", description="내 프로필 및 활동 정보를 요약해서 보여줍니다.")
 async def my_profile(interaction: discord.Interaction):
     pts = get_user_points(interaction.guild_id, interaction.user.id)
@@ -504,7 +515,6 @@ async def my_profile(interaction: discord.Interaction):
     embed.add_field(name="💰 보유 포인트", value=fmt_won(pts), inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 7. 출금신청
 @bot.tree.command(name="출금신청", description="보유 포인트를 현금 환전/출금 신청합니다.")
 @app_commands.describe(금액="출금할 포인트")
 async def withdraw_points(interaction: discord.Interaction, 금액: int):
@@ -515,7 +525,6 @@ async def withdraw_points(interaction: discord.Interaction, 금액: int):
         return await interaction.response.send_message("❌ 포인트 부족", ephemeral=True)
     await interaction.response.send_message(f"✅ {fmt_won(금액)} 출금 신청이 관리자에게 접수되었습니다.", ephemeral=True)
 
-# 8. 송금하기
 @bot.tree.command(name="송금하기", description="다른 유저에게 포인트를 선물합니다.")
 @app_commands.describe(유저="선물할 유저", 금액="선물할 포인트")
 async def send_points(interaction: discord.Interaction, 유저: discord.Member, 금액: int):
@@ -531,7 +540,6 @@ async def send_points(interaction: discord.Interaction, 유저: discord.Member, 
     conn.close()
     await interaction.response.send_message(f"✅ {유저.mention}님께 {fmt_won(금액)}을(를) 송금했습니다.", ephemeral=True)
 
-# 9. 상점목록
 @bot.tree.command(name="상점목록", description="서버에 등록된 모든 판매 상품을 조회합니다.")
 async def shop_list_cmd(interaction: discord.Interaction):
     conn = get_conn()
@@ -545,7 +553,6 @@ async def shop_list_cmd(interaction: discord.Interaction):
         embed.add_field(name=f"[{it['category']}] {it['item']}", value=f"가격: **{fmt_won(it['price'])}** | 재고: {stock_str}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 10. 상품검색
 @bot.tree.command(name="상품검색", description="원하는 상품 이름을 검색합니다.")
 @app_commands.describe(검색어="검색할 상품명")
 async def search_product(interaction: discord.Interaction, 검색어: str):
@@ -559,13 +566,11 @@ async def search_product(interaction: discord.Interaction, 검색어: str):
         embed.add_field(name=f"[{it['category']}] {it['item']}", value=f"가격: {fmt_won(it['price'])}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 11. 건의하기
 @bot.tree.command(name="건의하기", description="서버 운영진에게 건의사항을 전달합니다.")
 @app_commands.describe(내용="건의할 내용")
 async def suggest_cmd(interaction: discord.Interaction, 내용: str):
     await interaction.response.send_message("✅ 건의사항이 운영진에게 전송되었습니다.", ephemeral=True)
 
-# 12. 출석현황
 @bot.tree.command(name="출석현황", description="나의 최근 출석체크 기록을 확인합니다.")
 async def attendance_status(interaction: discord.Interaction):
     conn = get_conn()
@@ -574,12 +579,24 @@ async def attendance_status(interaction: discord.Interaction):
     last = row["last_date"] if row else "기록 없음"
     await interaction.response.send_message(f"📅 최근 출석일: **{last}**", ephemeral=True)
 
-# 13. 버프확인
 @bot.tree.command(name="버프확인", description="현재 적용 중인 서버 버프 및 혜택을 확인합니다.")
 async def check_buffs(interaction: discord.Interaction):
     await interaction.response.send_message("✨ 현재 적용 중인 특별 버프가 없습니다.", ephemeral=True)
 
-# 14. 상품등록 (관리자/판매자)
+# 📸 이미지 속 인증 패널을 현재 채널에 띄우는 관리자 명령어 추가
+@bot.tree.command(name="인증패널전송", description="라이벌 BEST클랜 회원 인증 패널을 현재 채널에 전송합니다.")
+async def send_verify_panel(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ 관리자만 사용할 수 있습니다.", ephemeral=True)
+    
+    embed = discord.Embed(
+        title="🔒 라이벌 BEST클랜 회원 인증",
+        description="아래 [인증하기 🔓] 버튼을 누른 후, 안내되는 4자리 숫자를 입력해 주세요.",
+        color=discord.Color.from_rgb(46, 204, 113)
+    )
+    await interaction.channel.send(embed=embed, view=VerifyView())
+    await interaction.response.send_message("✅ 인증 패널을 전송했습니다.", ephemeral=True)
+
 @bot.tree.command(name="상품등록", description="상점에 새로운 상품을 등록합니다.")
 @app_commands.describe(카테고리="카테고리", 상품명="상품명", 가격="가격", 재고="재고 (-1은 무제한)")
 async def register_product(interaction: discord.Interaction, 카테고리: str, 상품명: str, 가격: int, 재고: int = -1):
@@ -591,7 +608,6 @@ async def register_product(interaction: discord.Interaction, 카테고리: str, 
     conn.close()
     await interaction.response.send_message(f"✅ 상품 **[{카테고리}] {상품명}** 등록 완료!", ephemeral=True)
 
-# 15. 포인트지급 (관리자/판매자)
 @bot.tree.command(name="포인트지급", description="유저에게 포인트를 지급합니다.")
 @app_commands.describe(유저="대상 유저", 금액="지급할 포인트")
 async def give_points(interaction: discord.Interaction, 유저: discord.Member, 금액: int):
@@ -603,7 +619,6 @@ async def give_points(interaction: discord.Interaction, 유저: discord.Member, 
     conn.close()
     await interaction.response.send_message(f"✅ {유저.mention}님께 {fmt_won(금액)} 지급 완료!", ephemeral=True)
 
-# 16. 포인트차감 (관리자/판매자)
 @bot.tree.command(name="포인트차감", description="유저의 포인트를 강제로 차감합니다.")
 @app_commands.describe(유저="대상 유저", 금액="차감할 포인트")
 async def remove_points(interaction: discord.Interaction, 유저: discord.Member, 금액: int):
@@ -615,7 +630,6 @@ async def remove_points(interaction: discord.Interaction, 유저: discord.Member
     conn.close()
     await interaction.response.send_message(f"✅ {유저.mention}님의 포인트 {fmt_won(금액)} 차감 완료!", ephemeral=True)
 
-# 17. 관리자등록 (관리자 전용)
 @bot.tree.command(name="관리자등록", description="새로운 봇 관리자를 임명합니다.")
 @app_commands.describe(유저="임명할 유저")
 async def add_bot_admin(interaction: discord.Interaction, 유저: discord.Member):
@@ -627,7 +641,6 @@ async def add_bot_admin(interaction: discord.Interaction, 유저: discord.Member
     conn.close()
     await interaction.response.send_message(f"✅ {유저.mention}님을 봇 관리자로 등록했습니다.", ephemeral=True)
 
-# 18. 판매자등록 (관리자 전용)
 @bot.tree.command(name="판매자등록", description="새로운 판매자를 임명합니다.")
 @app_commands.describe(유저="임명할 유저")
 async def add_bot_seller(interaction: discord.Interaction, 유저: discord.Member):
@@ -639,7 +652,6 @@ async def add_bot_seller(interaction: discord.Interaction, 유저: discord.Membe
     conn.close()
     await interaction.response.send_message(f"✅ {유저.mention}님을 판매자로 등록했습니다.", ephemeral=True)
 
-# 19. 재고수정 (관리자/판매자)
 @bot.tree.command(name="재고수정", description="등록된 상품의 재고를 수정합니다.")
 @app_commands.describe(상품명="상품명", 재고="변경할 재고 개수")
 async def update_stock(interaction: discord.Interaction, 상품명: str, 재고: int):
@@ -651,7 +663,6 @@ async def update_stock(interaction: discord.Interaction, 상품명: str, 재고:
     conn.close()
     await interaction.response.send_message(f"✅ '{상품명}' 상품의 재고를 {재고}개로 수정했습니다.", ephemeral=True)
 
-# 20. 서버정보
 @bot.tree.command(name="서버정보", description="현재 서버의 기본 정보와 봇 등록 상태를 확인합니다.")
 async def server_info(interaction: discord.Interaction):
     is_reg = is_guild_registered(interaction.guild_id)
@@ -660,7 +671,6 @@ async def server_info(interaction: discord.Interaction):
     embed.add_field(name="라이센스 승인", value="✅ 승인됨" if is_reg else "❌ 미승인", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 21. 공지발송 (관리자 전용)
 @bot.tree.command(name="공지발송", description="서버 전체에 공지사항을 임베드로 전송합니다.")
 @app_commands.describe(내용="공지 내용")
 async def send_announcement(interaction: discord.Interaction, 내용: str):
@@ -670,7 +680,6 @@ async def send_announcement(interaction: discord.Interaction, 내용: str):
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message("✅ 공지 전송 완료", ephemeral=True)
 
-# 22. 역할지급 (관리자 전용)
 @bot.tree.command(name="역할지급", description="유저에게 특정 역할을 부여합니다.")
 @app_commands.describe(유저="대상 유저", 역할="부여할 역할")
 async def give_role(interaction: discord.Interaction, 유저: discord.Member, 역할: discord.Role):
@@ -679,7 +688,6 @@ async def give_role(interaction: discord.Interaction, 유저: discord.Member, �
     await 유저.add_roles(역할)
     await interaction.response.send_message(f"✅ {유저.mention}님께 {역할.name} 역할을 지급했습니다.", ephemeral=True)
 
-# 23. 청소하기 (관리자 전용)
 @bot.tree.command(name="청소하기", description="채팅 메시지를 지정한 개수만큼 삭제합니다.")
 @app_commands.describe(개수="삭제할 메시지 개수")
 async def clear_messages(interaction: discord.Interaction, 개수: int):
