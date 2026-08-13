@@ -632,7 +632,7 @@ async def register_product(interaction: discord.Interaction, 카테고리: str, 
     await interaction.response.send_message(f"✅ 상품 **[{카테고리}] {상품명}** (가격: {fmt_won(가격)}, 재고: {재고})이(가) 등록되었습니다.", ephemeral=True)
 
 @bot.tree.command(name="포인트지급", description="유저에게 포인트를 지급합니다.")
-@app_commands.describe(유저="지급할 유저",금액="지급할 포인트")
+@app_commands.describe(유저="지급할 유저", 금액="지급할 포인트")
 async def give_points(interaction: discord.Interaction, 유저: discord.Member, 금액: int):
     if not is_admin_or_seller(interaction):
         return await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
@@ -644,7 +644,7 @@ async def give_points(interaction: discord.Interaction, 유저: discord.Member, 
     )
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ {유저.mention님께 {fmt_won(금액)}을(를) 지급했습니다.", ephemeral=True)
+    await interaction.response.send_message(f"✅ {유저.mention}님께 {fmt_won(금액)}을(를) 지급했습니다.", ephemeral=True)
 
 @bot.tree.command(name="포인트조회", description="내 남은 포인트 잔액을 확인합니다.")
 async def check_my_points(interaction: discord.Interaction):
