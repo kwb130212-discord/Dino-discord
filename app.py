@@ -44,13 +44,18 @@ class GatedCommandTree(app_commands.CommandTree):
         all_user_commands = [
             "라이센스등록", "발로란트전적", "포인트조회", "내구매내역", "출석체크", 
             "내정보", "출금신청", "송금하기", "상점목록", "상품검색", 
-            "건의하기", "출석현황", "버프확인", "인증패널전송", "상품등록", 
-            "포인트지급", "포인트차감", "관리자등록", "판매자등록", "재고수정", 
-            "서버정보", "공지발송", "역할지급", "청소하기"
+            "건의하기", "출석현황", "버프확인", "인증패널전송", "자판기패널전송", 
+            "입퇴장로그설정", "상품등록", "포인트지급", "포인트차감", "봇관리자등록", 
+            "서버관리자등록", "판매자등록", "재고수정", "서버정보", "공지발송", 
+            "역할지급", "청소하기"
         ]
 
         if cmd_name in all_user_commands:
-            admin_or_seller_cmds = ["인증패널전송", "상품등록", "포인트지급", "포인트차감", "관리자등록", "판매자등록", "재고수정", "공지발송", "역할지급", "청소하기"]
+            admin_or_seller_cmds = [
+                "인증패널전송", "자판기패널전송", "입퇴장로그설정", "상품등록", 
+                "포인트지급", "포인트차감", "봇관리자등록", "서버관리자등록", 
+                "판매자등록", "재고수정", "공지발송", "역할지급", "청소하기"
+            ]
             if cmd_name not in admin_or_seller_cmds:
                 return True
 
@@ -177,11 +182,21 @@ def init_db():
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
             receipt_channel_id INTEGER,
-            welcome_channel_id INTEGER
+            welcome_channel_id INTEGER,
+            log_channel_id INTEGER
         )
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS bot_admins (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            added_by INTEGER NOT NULL,
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS server_admins (
             guild_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             added_by INTEGER NOT NULL,
@@ -246,7 +261,7 @@ def is_guild_registered(guild_id: int) -> bool:
     exp_dt = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
     return datetime.now(KST) < exp_dt
 
-def is_admin(ctx_or_interaction) -> bool:
+def is_bot_admin(ctx_or_interaction) -> bool:
     if isinstance(ctx_or_interaction, discord.Interaction):
         member = ctx_or_interaction.user
         guild_id = ctx_or_interaction.guild_id
@@ -263,8 +278,28 @@ def is_admin(ctx_or_interaction) -> bool:
     conn.close()
     return row is not None
 
+def is_server_admin(ctx_or_interaction) -> bool:
+    if is_bot_admin(ctx_or_interaction):
+        return True
+    if isinstance(ctx_or_interaction, discord.Interaction):
+        member = ctx_or_interaction.user
+        guild_id = ctx_or_interaction.guild_id
+    else:
+        member = ctx_or_interaction.author
+        guild_id = ctx_or_interaction.guild.id if ctx_or_interaction.guild else None
+
+    if not isinstance(member, discord.Member):
+        return False
+    conn = get_conn()
+    row = conn.execute("SELECT 1 FROM server_admins WHERE guild_id = ? AND user_id = ?", (guild_id, member.id)).fetchone()
+    conn.close()
+    return row is not None
+
+def is_admin(ctx_or_interaction) -> bool:
+    return is_server_admin(ctx_or_interaction)
+
 def is_admin_or_seller(ctx_or_interaction) -> bool:
-    if is_admin(ctx_or_interaction):
+    if is_server_admin(ctx_or_interaction):
         return True
     guild_id = ctx_or_interaction.guild_id if isinstance(ctx_or_interaction, discord.Interaction) else (ctx_or_interaction.guild.id if ctx_or_interaction.guild else None)
     user_id = ctx_or_interaction.user.id if isinstance(ctx_or_interaction, discord.Interaction) else ctx_or_interaction.author.id
@@ -286,7 +321,7 @@ def get_user_points(guild_id: int, user_id: int) -> int:
     return row["points"] if row else 0
 
 # ---------------------------------------------------------------------------
-# UI Views (자판기 갠톡 연동 및 4자리 인증 모달 포함)
+# UI Views & Modals
 # ---------------------------------------------------------------------------
 class VerifyModal(discord.ui.Modal, title="라이벌 BEST클랜 회원 인증"):
     code_input = discord.ui.TextInput(
@@ -299,7 +334,6 @@ class VerifyModal(discord.ui.Modal, title="라이벌 BEST클랜 회원 인증"):
 
     async def on_submit(self, interaction: discord.Interaction):
         entered_code = self.code_input.value
-        # 간단한 4자리 숫자 검증 로직 (원하는 검증 규칙으로 변경 가능합니다)
         if entered_code.isdigit() and len(entered_code) == 4:
             role = discord.utils.get(interaction.guild.roles, name=VERIFY_ROLE_NAME)
             if role and isinstance(interaction.user, discord.Member):
@@ -583,11 +617,11 @@ async def attendance_status(interaction: discord.Interaction):
 async def check_buffs(interaction: discord.Interaction):
     await interaction.response.send_message("✨ 현재 적용 중인 특별 버프가 없습니다.", ephemeral=True)
 
-# 📸 이미지 속 인증 패널을 현재 채널에 띄우는 관리자 명령어 추가
-@bot.tree.command(name="인증패널전송", description="라이벌 BEST클랜 회원 인증 패널을 현재 채널에 전송합니다.")
+# 패널 전송 명령어들
+@bot.tree.command(name="인증패널전송", description="회원 인증 패널을 현재 채널에 전송합니다.")
 async def send_verify_panel(interaction: discord.Interaction):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ 관리자만 사용할 수 있습니다.", ephemeral=True)
+    if not is_server_admin(interaction):
+        return await interaction.response.send_message("❌ 서버 관리자만 사용할 수 있습니다.", ephemeral=True)
     
     embed = discord.Embed(
         title="🔒 라이벌 BEST클랜 회원 인증",
@@ -596,6 +630,31 @@ async def send_verify_panel(interaction: discord.Interaction):
     )
     await interaction.channel.send(embed=embed, view=VerifyView())
     await interaction.response.send_message("✅ 인증 패널을 전송했습니다.", ephemeral=True)
+
+@bot.tree.command(name="자판기패널전송", description="자판기(상점) 패널을 현재 채널에 전송합니다.")
+async def send_vending_panel(interaction: discord.Interaction):
+    if not is_server_admin(interaction):
+        return await interaction.response.send_message("❌ 서버 관리자만 사용할 수 있습니다.", ephemeral=True)
+    
+    embed = discord.Embed(
+        title="🛒 서버 전용 자판기",
+        description="아래 버튼을 눌러 상품을 구매하거나 포인트를 확인하세요.",
+        color=discord.Color.from_rgb(52, 152, 219)
+    )
+    await interaction.channel.send(embed=embed, view=MainVendingView())
+    await interaction.response.send_message("✅ 자판기 패널을 전송했습니다.", ephemeral=True)
+
+@bot.tree.command(name="입퇴장로그설정", description="입퇴장 로그(강퇴/밴 포함)를 출력할 채널을 설정합니다.")
+@app_commands.describe(채널="로그를 출력할 텍스트 채널")
+async def set_log_channel(interaction: discord.Interaction, 채널: discord.TextChannel):
+    if not is_server_admin(interaction):
+        return await interaction.response.send_message("❌ 서버 관리자만 사용할 수 있습니다.", ephemeral=True)
+    
+    conn = get_conn()
+    conn.execute("INSERT INTO guild_settings (guild_id, log_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = ?", (interaction.guild_id, 채널.id, 채널.id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ 입퇴장 로그 채널이 {채널.mention}로 설정되었습니다.", ephemeral=True)
 
 @bot.tree.command(name="상품등록", description="상점에 새로운 상품을 등록합니다.")
 @app_commands.describe(카테고리="카테고리", 상품명="상품명", 가격="가격", 재고="재고 (-1은 무제한)")
@@ -630,22 +689,33 @@ async def remove_points(interaction: discord.Interaction, 유저: discord.Member
     conn.close()
     await interaction.response.send_message(f"✅ {유저.mention}님의 포인트 {fmt_won(금액)} 차감 완료!", ephemeral=True)
 
-@bot.tree.command(name="관리자등록", description="새로운 봇 관리자를 임명합니다.")
+@bot.tree.command(name="봇관리자등록", description="새로운 봇 관리자를 임명합니다.")
 @app_commands.describe(유저="임명할 유저")
 async def add_bot_admin(interaction: discord.Interaction, 유저: discord.Member):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ 관리자만 가능합니다.", ephemeral=True)
+    if not is_bot_admin(interaction):
+        return await interaction.response.send_message("❌ 봇 관리자만 가능합니다.", ephemeral=True)
     conn = get_conn()
     conn.execute("INSERT INTO bot_admins (guild_id, user_id, added_by, added_at) VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO NOTHING", (interaction.guild_id, 유저.id, interaction.user.id, now_kst_str()))
     conn.commit()
     conn.close()
     await interaction.response.send_message(f"✅ {유저.mention}님을 봇 관리자로 등록했습니다.", ephemeral=True)
 
+@bot.tree.command(name="서버관리자등록", description="새로운 서버 관리자(서버관리 기능 전용)를 임명합니다.")
+@app_commands.describe(유저="임명할 유저")
+async def add_server_admin(interaction: discord.Interaction, 유저: discord.Member):
+    if not is_bot_admin(interaction):
+        return await interaction.response.send_message("❌ 봇 관리자만 서버 관리자를 등록할 수 있습니다.", ephemeral=True)
+    conn = get_conn()
+    conn.execute("INSERT INTO server_admins (guild_id, user_id, added_by, added_at) VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO NOTHING", (interaction.guild_id, 유저.id, interaction.user.id, now_kst_str()))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ {유저.mention}님을 서버 관리자로 등록했습니다.", ephemeral=True)
+
 @bot.tree.command(name="판매자등록", description="새로운 판매자를 임명합니다.")
 @app_commands.describe(유저="임명할 유저")
 async def add_bot_seller(interaction: discord.Interaction, 유저: discord.Member):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ 관리자만 가능합니다.", ephemeral=True)
+    if not is_server_admin(interaction):
+        return await interaction.response.send_message("❌ 서버 관리자만 가능합니다.", ephemeral=True)
     conn = get_conn()
     conn.execute("INSERT INTO bot_sellers (guild_id, user_id, added_by, added_at) VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO NOTHING", (interaction.guild_id, 유저.id, interaction.user.id, now_kst_str()))
     conn.commit()
@@ -674,8 +744,8 @@ async def server_info(interaction: discord.Interaction):
 @bot.tree.command(name="공지발송", description="서버 전체에 공지사항을 임베드로 전송합니다.")
 @app_commands.describe(내용="공지 내용")
 async def send_announcement(interaction: discord.Interaction, 내용: str):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ 관리자만 가능합니다.", ephemeral=True)
+    if not is_server_admin(interaction):
+        return await interaction.response.send_message("❌ 서버 관리자만 가능합니다.", ephemeral=True)
     embed = discord.Embed(title="📢 서버 공지사항", description=내용, color=discord.Color.red(), timestamp=datetime.now(KST))
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message("✅ 공지 전송 완료", ephemeral=True)
@@ -683,26 +753,26 @@ async def send_announcement(interaction: discord.Interaction, 내용: str):
 @bot.tree.command(name="역할지급", description="유저에게 특정 역할을 부여합니다.")
 @app_commands.describe(유저="대상 유저", 역할="부여할 역할")
 async def give_role(interaction: discord.Interaction, 유저: discord.Member, 역할: discord.Role):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ 관리자만 가능합니다.", ephemeral=True)
+    if not is_server_admin(interaction):
+        return await interaction.response.send_message("❌ 서버 관리자만 가능합니다.", ephemeral=True)
     await 유저.add_roles(역할)
     await interaction.response.send_message(f"✅ {유저.mention}님께 {역할.name} 역할을 지급했습니다.", ephemeral=True)
 
 @bot.tree.command(name="청소하기", description="채팅 메시지를 지정한 개수만큼 삭제합니다.")
 @app_commands.describe(개수="삭제할 메시지 개수")
 async def clear_messages(interaction: discord.Interaction, 개수: int):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ 관리자만 가능합니다.", ephemeral=True)
+    if not is_server_admin(interaction):
+        return await interaction.response.send_message("❌ 서버 관리자만 가능합니다.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=개수)
     await interaction.followup.send(f"✅ 메시지 {len(deleted)}개를 삭제했습니다.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
-# 전통적 접두사 명령어
+# 전통적 접두사 명령어 및 이벤트 리스너 (입퇴장 로그 포함)
 # ---------------------------------------------------------------------------
 @bot.command(name="서버등록")
 async def register_guild_cmd(ctx, guild_id_str: str = None, days_str: str = None):
-    if not is_admin(ctx):
+    if not is_bot_admin(ctx):
         return await ctx.send("❌ 이 명령어는 봇 관리자만 사용할 수 있습니다.")
     target_guild_id = int(guild_id_str) if guild_id_str else ctx.guild.id
     days = int(days_str) if days_str else 30
@@ -712,6 +782,42 @@ async def register_guild_cmd(ctx, guild_id_str: str = None, days_str: str = None
     conn.commit()
     conn.close()
     await ctx.send(f"✅ 서버(`{target_guild_id}`) 등록 완료. 만료일: `{expires_at}`")
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    conn = get_conn()
+    row = conn.execute("SELECT log_channel_id FROM guild_settings WHERE guild_id = ?", (member.guild.id,)).fetchone()
+    conn.close()
+    if row and row["log_channel_id"]:
+        ch = member.guild.get_channel(row["log_channel_id"])
+        if ch:
+            embed = discord.Embed(title="📥 유저 입장", description=f"{member.mention} (`{member}`) 님이 서버에 입장하셨습니다.", color=discord.Color.green(), timestamp=datetime.now(KST))
+            await ch.send(embed=embed)
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    conn = get_conn()
+    row = conn.execute("SELECT log_channel_id FROM guild_settings WHERE guild_id = ?", (member.guild.id,)).fetchone()
+    conn.close()
+    if row and row["log_channel_id"]:
+        ch = member.guild.get_channel(row["log_channel_id"])
+        if ch:
+            # 퇴장 사유(자진 퇴장, 강퇴, 밴 등) 판별
+            exit_type = "퇴장 (서버 이탈)"
+            try:
+                async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.kick):
+                    if entry.target.id == member.id and (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 10:
+                        exit_type = f"강퇴됨 (담당자: {entry.user})"
+                        break
+                async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.ban):
+                    if entry.target.id == member.id and (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 10:
+                        exit_type = f"밴(차단)됨 (담당자: {entry.user})"
+                        break
+            except Exception:
+                pass
+
+            embed = discord.Embed(title="📤 유저 퇴장", description=f"{member.mention} (`{member}`) 님이 서버를 나가셨습니다.\n**유형:** {exit_type}", color=discord.Color.red(), timestamp=datetime.now(KST))
+            await ch.send(embed=embed)
 
 # ---------------------------------------------------------------------------
 # 봇 구동 이벤트
