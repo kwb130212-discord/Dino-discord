@@ -14,11 +14,15 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 # ==============================================================================
-# 1. 환경변수 및 기본 설정
+# 1. 환경변수 및 기본 설정 (.env 연동 완료)
 # ==============================================================================
 load_dotenv()
 
-TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.getenv("DISCORD_TOKEN")
+CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
+CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
+
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "! !디노")
 DB_PATH = os.getenv("DB_PATH", "shop.db")
 KST = timezone(timedelta(hours=9))
@@ -272,23 +276,27 @@ class LogAdminActionView(discord.ui.View):
         super().__init__(timeout=None)
         self.target_id = target_user_id
 
-    @discord.ui.button(label="강퇴 (Kick)", style=discord.ButtonStyle.secondary, custom_id="mod_kick")
-    async def kick_btn(self, interaction: discord.Interaction, btn: discord.ui.Button):
-        if not is_server_admin(interaction.user, interaction.guild_id): return await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
-        try:
-            m = interaction.guild.get_member(self.target_id) or await interaction.guild.fetch_member(self.target_id)
-            await m.kick(reason=f"관리자 {interaction.user} 강퇴")
-            await interaction.response.send_message("✅ 강퇴 완료", ephemeral=True)
-        except Exception as e: await interaction.response.send_message(f"❌ 실패: {e}", ephemeral=True)
+    # 봇 관리자(!관리자) 또는 서버 관리자 권한 확인 함수
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        guild_id = interaction.guild_id
+        # 1. 서버 관리자 혹은 봇 관리자 세트에 포함되어 있는지 확인
+        if is_server_admin(interaction.user, guild_id) or interaction.user.id in authorized_managers:
+            return True
+        await interaction.response.send_message("❌ `!관리자` 명령어로 등록된 봇 관리자 또는 서버 관리자만 버튼을 사용할 수 있습니다!", ephemeral=True)
+        return False
 
-    @discord.ui.button(label="밴 (Ban)", style=discord.ButtonStyle.danger, custom_id="mod_ban")
+    @discord.ui.button(label="추방 (Kick)", style=discord.ButtonStyle.secondary, custom_id="mod_kick")
+    async def kick_btn(self, interaction: discord.Interaction, btn: discord.ui.Button):
+        await interaction.response.send_message("⚠️ 이미 서버를 나간 유저이므로 추방할 수 없습니다. (차단만 가능합니다.)", ephemeral=True)
+
+    @discord.ui.button(label="차단 (Ban)", style=discord.ButtonStyle.danger, custom_id="mod_ban")
     async def ban_btn(self, interaction: discord.Interaction, btn: discord.ui.Button):
-        if not is_server_admin(interaction.user, interaction.guild_id): return await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
         try:
-            u = await interaction.client.fetch_user(self.target_id)
-            await interaction.guild.ban(u, reason=f"관리자 {interaction.user} 밴")
+            # 나간 유저도 ID 객체를 통해 차단(Ban) 가능
+            await interaction.guild.ban(discord.Object(id=self.target_id), reason=f"봇 관리자 패널을 통한 차단 (실행자: {interaction.user})")
             await interaction.response.send_message("✅ 차단(밴) 완료", ephemeral=True)
-        except Exception as e: await interaction.response.send_message(f"❌ 실패: {e}", ephemeral=True)
+        except Exception as e: 
+            await interaction.response.send_message(f"❌ 차단 실패: {e}", ephemeral=True)
 
 # ==============================================================================
 # 5. Cogs (명령어 모듈화)
@@ -443,7 +451,7 @@ class ShopCog(commands.Cog):
     @seller_only()
     async def add_item(self, interaction: discord.Interaction, 카테고리: str, 상품명: str, 가격: int, 재고: int = -1):
         DB.execute("INSERT INTO prices (guild_id, item, category, price, stock) VALUES (?,?,?,?,?) ON CONFLICT DO UPDATE SET category=?, price=?, stock=?", interaction.guild_id, 상품명, 카테고리, 가격, 재고, 카테고리, 가격, 재고)
-        await interaction.response.send_message(f"✅ [{카테고리}] {상품명} ({fmt_won(가격)}) 등록 완료.", ephemeral=True)
+        await interaction.response.send_message(f"✅ [{카테고리}] { 상품명} ({fmt_won(가격)}) 등록 완료.", ephemeral=True)
 
     @app_commands.command(name="재고수정", description="상품 재고를 특정 수량으로 덮어씁니다.")
     @seller_only()
@@ -585,6 +593,9 @@ class OwnerPrefixCog(commands.Cog):
 # ==============================================================================
 # 6. 메인 봇 클래스 (트리 및 이벤트)
 # ==============================================================================
+# 봇 관리자 유저 ID들을 저장하는 세트 (`!관리자 @멘션` 용도)
+authorized_managers = set()
+
 class DinoBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
@@ -622,6 +633,16 @@ class DinoBot(commands.Bot):
 
 bot = DinoBot()
 
+# --- 봇 관리자 지정 명령어 (!관리자 @멘션) ---
+@bot.command(name="관리자")
+async def add_manager(ctx, member: discord.Member):
+    if not ctx.author.guild_permissions.administrator and not is_bot_admin(ctx.author, ctx.guild.id):
+        await ctx.send("❌ 서버 관리자만 봇 관리자를 지정할 수 있습니다.")
+        return
+
+    authorized_managers.add(member.id)
+    await ctx.send(f"✅ {member.mention} 님이 봇 관리자로 등록되었습니다. 이제 퇴장 로그의 제재 버튼을 누를 수 있습니다.")
+
 @bot.event
 async def on_member_join(member: discord.Member):
     row = DB.fetchone("SELECT log_channel_id FROM guild_settings WHERE guild_id=?", member.guild.id)
@@ -649,10 +670,10 @@ async def on_member_remove(member: discord.Member):
                 typ = f"밴 ({e.user})"
     except: pass
 
-    embed = discord.Embed(title="📤 퇴장", description=f"{member.mention} 나감. (유형: {typ})", color=discord.Color.red(), timestamp=datetime.now(KST))
+    embed = discord.Embed(title="📤 퇴장", description=f"{member.mention} 나감. (유형: {typ})\n봇 관리자만 아래 버튼으로 즉시 차단할 수 있습니다.", color=discord.Color.red(), timestamp=datetime.now(KST))
     await ch.send(embed=embed, view=LogAdminActionView(member.id))
 
 if __name__ == "__main__":
-    if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
-        raise SystemExit("❌ DISCORD_TOKEN 설정 필요.")
+    if not TOKEN:
+        raise SystemExit("❌ DISCORD_TOKEN 설정 필요. 환경변수(.env) 세팅을 확인해주세요.")
     bot.run(TOKEN)
