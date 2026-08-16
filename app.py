@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import sqlite3
 import json
 import secrets
 import string
@@ -17,6 +16,10 @@ from dotenv import load_dotenv
 import aiohttp
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import uvicorn
+from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from contextlib import asynccontextmanager
 
 # ==============================================================================
 # 1. 환경변수 및 기본 설정 (.env 연동 완료)
@@ -26,7 +29,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI")
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://dino-web-2trw.onrender.com/auth/callback")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "! !디노")
@@ -43,13 +46,15 @@ def fmt_won(n: int) -> str:
     return f"{n:,}원"
 
 # ==============================================================================
-# 2. 데이터베이스 매니저 (PostgreSQL / Supabase용)
+# 2. 데이터베이스 매니저 (PostgreSQL / Supabase용 추상화 클래스)
 # ==============================================================================
 class DB:
+    """PostgreSQL(Supabase) 연결을 위한 정적 매니저 클래스"""
     @staticmethod
     def get_connection():
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-        return conn
+        if not DATABASE_URL:
+            raise ValueError("❌ DATABASE_URL 환경 변수가 설정되지 않았습니다.")
+        return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
     @staticmethod
     def fetchone(query: str, *params) -> Optional[dict]:
@@ -222,10 +227,10 @@ def seller_only():
 # 4. UI 컴포넌트 (Views & Modals)
 # ==============================================================================
 class VerifyView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, guild_id: int = None):
         super().__init__(timeout=None)
         client_id = CLIENT_ID or os.getenv("DISCORD_CLIENT_ID")
-        redirect_uri = REDIRECT_URI or os.getenv("REDIRECT_URI", "https://dino-web-2trw.onrender.com/auth/callback")
+        redirect_uri = REDIRECT_URI
         
         oauth_url = (
             f"https://discord.com/api/oauth2/authorize"
@@ -234,6 +239,9 @@ class VerifyView(discord.ui.View):
             f"&response_type=code"
             f"&scope=identify%20guilds.join"
         )
+        if guild_id:
+            oauth_url += f"&state={guild_id}"
+            
         self.add_item(discord.ui.Button(
             label="웹 연동 인증하기 🔓", 
             style=discord.ButtonStyle.link, 
@@ -637,7 +645,7 @@ class EconomyCog(commands.Cog):
     async def withdraw_pts(self, interaction: discord.Interaction, 금액: int):
         if 금액 <= 0 or get_user_points(interaction.guild_id, interaction.user.id) < 금액:
             return await interaction.response.send_message("❌ 올바른 금액 또는 잔액 부족.", ephemeral=True)
-        DB.execute("INSERT INTO withdraw_requests (guild_id, user_id, amount, created_at) VALUES (?,?,?,?)", interaction.guild_id, interaction.user.id, 금액, now_kst_str())
+        DB.execute("INSERT INTO withdraw_requests (guild_id, user_id, amount, created_at) VALUES (?,?,?,?)", interaction.guild_id, interaction.user.id,금액, now_kst_str())
         await interaction.response.send_message(f"✅ {fmt_won(금액)} 출금 신청 완료.", ephemeral=True)
 
     @app_commands.command(name="송금하기", description="포인트를 선물합니다.")
@@ -663,7 +671,7 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="포인트차감", description="관리자가 포인트를 차감합니다.")
     @seller_only()
     async def admin_sub_pts(self, interaction: discord.Interaction, 유저: discord.Member, 금액: int):
-        DB.execute("UPDATE user_points SET points=GREATEST(0, points-?) WHERE guild_id=? AND user_id=?", 금액, interaction.guild_id, 유저.id)
+        DB.execute("UPDATE user_points SET points=GREATEST(0, points-?) WHERE guild_id=? AND user_id=?",금액, interaction.guild_id, 유저.id)
         await interaction.response.send_message(f"✅ {유저.mention}님 포인트 {fmt_won(금액)} 차감 완료.", ephemeral=True)
 
 class ShopCog(commands.Cog):
@@ -812,7 +820,7 @@ class AdminSetupCog(commands.Cog):
         """, interaction.guild_id, 채널.id)
         await interaction.response.send_message(f"✅ 로그 채널 설정: {채널.mention}", ephemeral=True)
 
-    @app_commands.command(name="인증로그채널설정", description="웹 인증 완료 시 로그를 기록할 채널을 지정합니다.")
+    @app_commands.command(name="인증로그채널설정", description="웹 연동 인증 완료 로그 채널 지정")
     @admin_only()
     async def set_verify_log(self, interaction: discord.Interaction, 채널: discord.TextChannel):
         DB.execute("""
@@ -835,7 +843,7 @@ class AdminSetupCog(commands.Cog):
     async def send_vpanel(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(title="🔒 유저 인증", description="버튼을 눌러 인증하세요.", color=discord.Color.green())
-        await interaction.channel.send(embed=embed, view=VerifyView())
+        await interaction.channel.send(embed=embed, view=VerifyView(interaction.guild.id))
         await interaction.followup.send("✅ 패널 전송 완료.", ephemeral=True)
 
 class OwnerPrefixCog(commands.Cog):
@@ -881,33 +889,6 @@ class DinoBot(commands.Bot):
         self.add_view(TicketControlView())
 
 bot = DinoBot()
-
-# 웹 서버 등에서 인증 완료 시 호출할 수 있는 전용 로그 전송 함수
-async def send_verification_log(bot_instance, guild_id: int, user_id: int, user_name: str, avatar_url: str = None):
-    guild = bot_instance.get_guild(guild_id)
-    if not guild:
-        return
-    row = DB.fetchone("SELECT verify_log_channel_id FROM guild_settings WHERE guild_id = ?", guild_id)
-    if not row or not row["verify_log_channel_id"]:
-        return
-    channel = guild.get_channel(row["verify_log_channel_id"])
-    if not channel:
-        return
-
-    embed = discord.Embed(
-        title="🔓 웹 연동 인증 완료",
-        description=f"<@{user_id}> (`{user_name}`) 님이 웹 연동 인증을 성공적으로 완료하셨습니다.",
-        color=discord.Color.green(),
-        timestamp=datetime.now(KST)
-    )
-    if avatar_url:
-        embed.set_thumbnail(url=avatar_url)
-    embed.add_field(name="인증된 사용자 ID", value=str(user_id), inline=False)
-    
-    try:
-        await channel.send(embed=embed)
-    except:
-        pass
 
 @bot.tree.interaction_check
 async def global_guild_check(interaction: discord.Interaction) -> bool:
@@ -963,7 +944,240 @@ async def on_member_remove(member: discord.Member):
     embed.add_field(name="🔄 총 방문 횟수", value=f"총 {join_count}회 드나듦", inline=False)
     await ch.send(embed=embed, view=LogAdminActionView(member.id))
 
+# ==============================================================================
+# 7. FastAPI 웹 서버 라우터 및 Lifespan 통합
+# ==============================================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 웹 서버가 켜질 때 백그라운드 태스크로 디스코드 봇 구동
+    bot_task = asyncio.create_task(bot.start(TOKEN))
+    yield
+    await bot.close()
+    await bot_task
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+def home():
+    return {"status": "Auth Server Running with PostgreSQL"}
+
+@app.get("/login")
+def login(guild_id: str = None):
+    auth_url = (
+        f"https://discord.com/api/oauth2/authorize?client_id={CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds.join"
+    )
+    if guild_id:
+        auth_url += f"&state={guild_id}"
+    return RedirectResponse(auth_url)
+
+@app.get("/auth/callback", response_class=HTMLResponse)
+async def callback(code: str, state: str = None):
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            "https://discord.com/api/oauth2/token",
+            data={
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+            }
+        )
+        token_data = token_resp.json()
+        
+        if "access_token" not in token_data:
+            return """
+            <!DOCTYPE html>
+            <html lang="ko">
+            <head><meta charset="UTF-8"><title>인증 실패</title>
+            <style>body{background:#0f172a;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}.card{background:#1e293b;padding:40px;border-radius:20px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,0.5);border:1px solid #334155;}</style>
+            </head><body><div class="card"><h2 style="color:#f87171;">❌ 인증 실패</h2><p>디스코드 토큰을 발급받지 못했습니다.<br>다시 시도해 주세요.</p></div></body></html>
+            """
+
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token")
+        
+        user_resp = await client.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        user_data = user_resp.json()
+        user_id = user_data.get("id")
+        username = user_data.get("username")
+        avatar = user_data.get("avatar")
+        avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else "https://cdn.discordapp.com/embed/avatars/0.png"
+
+        if user_id and DATABASE_URL:
+            try:
+                with DB.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        if state:
+                            cur.execute(
+                                """INSERT INTO user_tokens (guild_id, user_id, access_token, refresh_token) 
+                                   VALUES (%s, %s, %s, %s) 
+                                   ON CONFLICT (guild_id, user_id) 
+                                   DO UPDATE SET access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token""",
+                                (int(state), int(user_id), access_token, refresh_token)
+                            )
+                        else:
+                            cur.execute("SELECT guild_id FROM guild_settings")
+                            all_guilds = cur.fetchall()
+                            for g in all_guilds:
+                                cur.execute(
+                                    """INSERT INTO user_tokens (guild_id, user_id, access_token, refresh_token) 
+                                       VALUES (%s, %s, %s, %s) 
+                                       ON CONFLICT (guild_id, user_id) 
+                                       DO UPDATE SET access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token""",
+                                    (g["guild_id"], int(user_id), access_token, refresh_token)
+                                )
+                        conn.commit()
+
+                targets = []
+                with DB.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        if state:
+                            cur.execute("SELECT verify_log_channel_id FROM guild_settings WHERE guild_id = %s", (int(state),))
+                            targets = cur.fetchall()
+                        else:
+                            cur.execute("SELECT verify_log_channel_id FROM guild_settings WHERE verify_log_channel_id IS NOT NULL")
+                            targets = cur.fetchall()
+
+                if TOKEN:
+                    for row in targets:
+                        ch_id = row.get("verify_log_channel_id")
+                        if ch_id:
+                            embed_payload = {
+                                "embeds": [{
+                                    "title": "🔓 웹 연동 인증 완료",
+                                    "description": f"<@{user_id}> (`{username}`) 님이 웹 연동 인증을 성공적으로 완료하셨습니다.",
+                                    "color": 5763719,
+                                    "thumbnail": {"url": avatar_url},
+                                    "fields": [{"name": "인증된 사용자 ID", "value": str(user_id), "inline": False}],
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                }]
+                            }
+                            async with httpx.AsyncClient() as log_client:
+                                await log_client.post(
+                                    f"https://discord.com/api/v10/channels/{ch_id}/messages",
+                                    headers={"Authorization": f"Bot {TOKEN}", "Content-Type": "application/json"},
+                                    json=embed_payload
+                                )
+            except Exception as e:
+                print(f"❌ DB 연동 또는 로그 전송 오류: {e}")
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="ko">
+    <head>
+        <meta charset="UTF-8">
+        <title>디스코드 통합 인증 완료</title>
+        <style>
+            * {{ box-sizing: border-box; }}
+            body {{
+                background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+                color: #f8fafc;
+                font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }}
+            .card {{
+                background: rgba(30, 41, 59, 0.7);
+                backdrop-filter: blur(16px);
+                -webkit-backdrop-filter: blur(16px);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 45px 35px;
+                border-radius: 24px;
+                text-align: center;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+                width: 360px;
+                animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+            }}
+            @keyframes fadeIn {{
+                from {{ opacity: 0; transform: translateY(20px); }}
+                to {{ opacity: 1; transform: translateY(0); }}
+            }}
+            .profile-img {{
+                width: 72px;
+                height: 72px;
+                border-radius: 50%;
+                border: 3px solid #38bdf8;
+                margin: 0 auto 16px auto;
+                object-fit: cover;
+                box-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
+            }}
+            .icon-badge {{
+                width: 32px;
+                height: 32px;
+                background-color: #22c55e;
+                color: #ffffff;
+                border-radius: 50%;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                margin: -30px auto 15px auto;
+                font-size: 14px;
+                font-weight: bold;
+                border: 3px solid #1e293b;
+                position: relative;
+                z-index: 2;
+            }}
+            h2 {{
+                margin: 0 0 8px 0;
+                font-size: 22px;
+                font-weight: 700;
+                letter-spacing: -0.5px;
+            }}
+            .username-highlight {{
+                color: #38bdf8;
+            }}
+            p {{
+                color: #94a3b8;
+                font-size: 14px;
+                line-height: 1.6;
+                margin: 0 0 30px 0;
+            }}
+            .btn {{
+                background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+                color: white;
+                border: none;
+                width: 100%;
+                padding: 12px 0;
+                border-radius: 12px;
+                font-weight: 600;
+                cursor: pointer;
+                font-size: 15px;
+                box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+                transition: all 0.2s ease;
+            }}
+            .btn:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 6px 16px rgba(56, 189, 248, 0.4);
+            }}
+            .btn:active {{
+                transform: translateY(0);
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <img src="{avatar_url}" alt="프로필" class="profile-img">
+            <div class="icon-badge">✓</div>
+            <h2>인증이 완료되었습니다</h2>
+            <p><span class="username-highlight">{username}</span> 님의 계정 연동 및 인증이<br>성공적으로 처리되었습니다. 이제 창을 닫으셔도 됩니다.</p>
+            <button class="btn" onclick="window.close()">창 닫기</button>
+        </div>
+    </body>
+    </html>
+    """
+
+# ==============================================================================
+# 8. 메인 실행 진입점
+# ==============================================================================
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("❌ DISCORD_TOKEN 설정 필요.")
-    bot.run(TOKEN)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
