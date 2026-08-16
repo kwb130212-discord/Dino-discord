@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
-import sqlite3 # 기존 호환성을 위해 유지하되, 내부적으로 psycopg2 또는 asyncpg/sqlite 분기 처리 필요
+import sqlite3
 import json
 import secrets
 import string
@@ -27,7 +27,6 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
-# Supabase(PostgreSQL) 연결을 위한 DATABASE_URL 환경 변수 불러오기
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "! !디노")
@@ -44,19 +43,16 @@ def fmt_won(n: int) -> str:
     return f"{n:,}원"
 
 # ==============================================================================
-# 2. 데이터베이스 매니저 (PostgreSQL / Supabase용 추상화 클래스)
+# 2. 데이터베이스 매니저 (PostgreSQL / Supabase용)
 # ==============================================================================
 class DB:
-    """PostgreSQL(Supabase) 연결을 위한 정적 매니저 클래스"""
     @staticmethod
     def get_connection():
-        # DATABASE_URL을 이용해 Supabase PostgreSQL에 연결
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         return conn
 
     @staticmethod
     def fetchone(query: str, *params) -> Optional[dict]:
-        # PostgreSQL 플레이스홀더(?)를 (%s)로 자동 변환
         pg_query = query.replace("?", "%s")
         with DB.get_connection() as conn:
             with conn.cursor() as cur:
@@ -83,7 +79,6 @@ class DB:
 
     @staticmethod
     def init_db():
-        # PostgreSQL 문법에 맞춘 테이블 생성 쿼리
         queries = [
             """CREATE TABLE IF NOT EXISTS prices (
                 guild_id BIGINT NOT NULL, item TEXT NOT NULL, category TEXT DEFAULT '기타',
@@ -111,7 +106,7 @@ class DB:
                 license_key TEXT PRIMARY KEY, duration_days INTEGER NOT NULL, is_used INTEGER DEFAULT 0, used_by_guild BIGINT, used_at TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS guild_settings (
-                guild_id BIGINT PRIMARY KEY, receipt_channel_id BIGINT, welcome_channel_id BIGINT, log_channel_id BIGINT, verify_role_id BIGINT, ticket_category_id BIGINT, ticket_role_id BIGINT, ticket_message TEXT
+                guild_id BIGINT PRIMARY KEY, receipt_channel_id BIGINT, welcome_channel_id BIGINT, log_channel_id BIGINT, verify_role_id BIGINT, ticket_category_id BIGINT, ticket_role_id BIGINT, ticket_message TEXT, verify_log_channel_id BIGINT
             )""",
             """CREATE TABLE IF NOT EXISTS bot_admins (
                 guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, added_by BIGINT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (guild_id, user_id)
@@ -151,9 +146,9 @@ class DB:
             with conn.cursor() as cur:
                 for q in queries:
                     cur.execute(q)
-                # 컬럼 추가 안전 장치
                 try:
                     cur.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS ticket_message TEXT")
+                    cur.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS verify_log_channel_id BIGINT")
                 except Exception:
                     conn.rollback()
                 conn.commit()
@@ -455,7 +450,6 @@ class SystemCog(commands.Cog):
         exp_str = (start_dt + timedelta(days=lic["duration_days"])).strftime("%Y-%m-%d %H:%M:%S")
         DB.execute("UPDATE licenses SET is_used=1, used_by_guild=?, used_at=? WHERE license_key=?", interaction.guild_id, now_kst_str(), 라이센스키)
         
-        # PostgreSQL Upsert 구문 (ON CONFLICT)
         DB.execute("""
             INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at) 
             VALUES (?,?,?,?) 
@@ -643,7 +637,7 @@ class EconomyCog(commands.Cog):
     async def withdraw_pts(self, interaction: discord.Interaction, 금액: int):
         if 금액 <= 0 or get_user_points(interaction.guild_id, interaction.user.id) < 금액:
             return await interaction.response.send_message("❌ 올바른 금액 또는 잔액 부족.", ephemeral=True)
-        DB.execute("INSERT INTO withdraw_requests (guild_id, user_id, amount, created_at) VALUES (?,?,?,?)", interaction.guild_id, interaction.user.id,금액, now_kst_str())
+        DB.execute("INSERT INTO withdraw_requests (guild_id, user_id, amount, created_at) VALUES (?,?,?,?)", interaction.guild_id, interaction.user.id, 금액, now_kst_str())
         await interaction.response.send_message(f"✅ {fmt_won(금액)} 출금 신청 완료.", ephemeral=True)
 
     @app_commands.command(name="송금하기", description="포인트를 선물합니다.")
@@ -669,7 +663,7 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="포인트차감", description="관리자가 포인트를 차감합니다.")
     @seller_only()
     async def admin_sub_pts(self, interaction: discord.Interaction, 유저: discord.Member, 금액: int):
-        DB.execute("UPDATE user_points SET points=GREATEST(0, points-?) WHERE guild_id=? AND user_id=?",금액, interaction.guild_id, 유저.id)
+        DB.execute("UPDATE user_points SET points=GREATEST(0, points-?) WHERE guild_id=? AND user_id=?", 금액, interaction.guild_id, 유저.id)
         await interaction.response.send_message(f"✅ {유저.mention}님 포인트 {fmt_won(금액)} 차감 완료.", ephemeral=True)
 
 class ShopCog(commands.Cog):
@@ -818,6 +812,15 @@ class AdminSetupCog(commands.Cog):
         """, interaction.guild_id, 채널.id)
         await interaction.response.send_message(f"✅ 로그 채널 설정: {채널.mention}", ephemeral=True)
 
+    @app_commands.command(name="인증로그채널설정", description="웹 인증 완료 시 로그를 기록할 채널을 지정합니다.")
+    @admin_only()
+    async def set_verify_log(self, interaction: discord.Interaction, 채널: discord.TextChannel):
+        DB.execute("""
+            INSERT INTO guild_settings (guild_id, verify_log_channel_id) VALUES (?,?) 
+            ON CONFLICT (guild_id) DO UPDATE SET verify_log_channel_id=EXCLUDED.verify_log_channel_id
+        """, interaction.guild_id, 채널.id)
+        await interaction.response.send_message(f"✅ 인증 로그 채널 설정: {채널.mention}", ephemeral=True)
+
     @app_commands.command(name="인증역할설정", description="인증 완료 시 줄 역할")
     @admin_only()
     async def set_vrole(self, interaction: discord.Interaction, 역할: discord.Role):
@@ -846,7 +849,7 @@ class OwnerPrefixCog(commands.Cog):
         DB.execute("""
             INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at) VALUES (?,?,?,?) 
             ON CONFLICT (guild_id) DO UPDATE SET expires_at=EXCLUDED.expires_at
-        """, tgt, ctx.author.id, now_kst_str(), exp, exp)
+        """, tgt, ctx.author.id, now_kst_str(), exp)
         await ctx.send(f"✅ 서버({tgt}) 등록됨. 만료: {exp}")
 
     @commands.command(name="강제동기화")
@@ -878,6 +881,33 @@ class DinoBot(commands.Bot):
         self.add_view(TicketControlView())
 
 bot = DinoBot()
+
+# 웹 서버 등에서 인증 완료 시 호출할 수 있는 전용 로그 전송 함수
+async def send_verification_log(bot_instance, guild_id: int, user_id: int, user_name: str, avatar_url: str = None):
+    guild = bot_instance.get_guild(guild_id)
+    if not guild:
+        return
+    row = DB.fetchone("SELECT verify_log_channel_id FROM guild_settings WHERE guild_id = ?", guild_id)
+    if not row or not row["verify_log_channel_id"]:
+        return
+    channel = guild.get_channel(row["verify_log_channel_id"])
+    if not channel:
+        return
+
+    embed = discord.Embed(
+        title="🔓 웹 연동 인증 완료",
+        description=f"<@{user_id}> (`{user_name}`) 님이 웹 연동 인증을 성공적으로 완료하셨습니다.",
+        color=discord.Color.green(),
+        timestamp=datetime.now(KST)
+    )
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+    embed.add_field(name="인증된 사용자 ID", value=str(user_id), inline=False)
+    
+    try:
+        await channel.send(embed=embed)
+    except:
+        pass
 
 @bot.tree.interaction_check
 async def global_guild_check(interaction: discord.Interaction) -> bool:
