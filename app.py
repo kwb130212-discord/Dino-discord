@@ -99,7 +99,6 @@ class DB:
         with DB.get_connection() as conn:
             for q in queries:
                 conn.execute(q)
-            # 기존 DB 호환을 위한 컬럼 추가 안전 장치
             try:
                 conn.execute("ALTER TABLE guild_settings ADD COLUMN ticket_message TEXT")
             except sqlite3.OperationalError:
@@ -157,9 +156,6 @@ async def send_purchase_receipt(guild: discord.Guild, buyer: discord.abc.User, i
 
 def admin_only():
     async def predicate(interaction: discord.Interaction):
-        if not is_guild_registered(interaction.guild_id):
-            await interaction.response.send_message("⚠️ 라이센스 만료 또는 승인되지 않은 서버입니다.", ephemeral=True)
-            return False
         if not is_server_admin(interaction.user, interaction.guild_id):
             await interaction.response.send_message("❌ 서버 관리자만 사용할 수 있습니다.", ephemeral=True)
             return False
@@ -168,9 +164,6 @@ def admin_only():
 
 def seller_only():
     async def predicate(interaction: discord.Interaction):
-        if not is_guild_registered(interaction.guild_id):
-            await interaction.response.send_message("⚠️ 라이센스 만료 또는 승인되지 않은 서버입니다.", ephemeral=True)
-            return False
         if not is_seller(interaction.user, interaction.guild_id):
             await interaction.response.send_message("❌ 관리자 또는 판매자만 사용할 수 있습니다.", ephemeral=True)
             return False
@@ -281,9 +274,6 @@ class MainVendingView(discord.ui.View):
     async def charge_btn(self, interaction: discord.Interaction, btn: discord.ui.Button):
         await interaction.response.send_message("💬 포인트 충전은 서버 관리자에게 문의해주세요!", ephemeral=True)
 
-# ------------------------------------------------------------------------------
-# 4.1. 고급 티켓 시스템 UI (Views)
-# ------------------------------------------------------------------------------
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -393,9 +383,12 @@ class LogAdminActionView(discord.ui.View):
 class SystemCog(commands.Cog):
     def __init__(self, bot): self.bot = bot
 
-    @app_commands.command(name="라이센스생성", description="새로운 서버 라이센스 키를 생성합니다.")
-    @admin_only()
+    @app_commands.command(name="라이센스생성", description="새로운 서버 라이센스 키를 생성합니다. (봇 주인 전용)")
     async def create_license(self, interaction: discord.Interaction, 일수: int):
+        # 봇 주인(Owner)만 생성 가능하도록 제한
+        if not await interaction.client.is_owner(interaction.user):
+            return await interaction.response.send_message("❌ 이 명령어는 봇 주인만 사용할 수 있습니다.", ephemeral=True)
+
         if 일수 <= 0:
             return await interaction.response.send_message("❌ 라이센스 기간은 1일 이상이어야 합니다.", ephemeral=True)
         
@@ -631,7 +624,6 @@ class TicketCog(commands.Cog):
     @app_commands.command(name="티켓패널", description="고급 티켓 생성 패널을 현재 채널에 전송합니다.")
     @admin_only()
     async def send_ticket_panel(self, interaction: discord.Interaction):
-        # 저장된 커스텀 메시지가 있으면 불러오고, 없으면 기본 메시지 사용
         row = DB.fetchone("SELECT ticket_message FROM guild_settings WHERE guild_id = ?", interaction.guild_id)
         custom_desc = row["ticket_message"] if row and row["ticket_message"] else (
             "서버 이용 중 도움이 필요하시거나 상품 관련 문의가 있으신가요?\n"
@@ -765,6 +757,24 @@ class DinoBot(commands.Bot):
         self.add_view(TicketControlView())
 
 bot = DinoBot()
+
+# 🔒 등록된 서버 및 라이센스가 유효한 경우에만 슬래시 명령어 실행 가능하도록 제한
+@bot.tree.interaction_check
+async def global_guild_check(interaction: discord.Interaction) -> bool:
+    if not interaction.guild:
+        await interaction.response.send_message("❌ DM에서는 이 명령어를 사용할 수 없습니다.", ephemeral=True)
+        return False
+    
+    # 미등록 서버에서도 '라이센스등록' 명령어는 사용할 수 있어야 키를 입력할 수 있습니다.
+    if interaction.command and interaction.command.name == "라이센스등록":
+        return True
+        
+    # 라이센스 및 서버 등록 여부 확인
+    if not is_guild_registered(interaction.guild.id):
+        await interaction.response.send_message("⚠️ **라이센스 만료 또는 승인되지 않은 서버입니다.**\n봇의 기능을 사용하려면 `/라이센스등록` 명령어로 라이센스를 먼저 등록해 주세요!", ephemeral=True)
+        return False
+        
+    return True
 
 @bot.event
 async def on_message(message: discord.Message):
