@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
-import sqlite3
+import sqlite3 # 기존 호환성을 위해 유지하되, 내부적으로 psycopg2 또는 asyncpg/sqlite 분기 처리 필요
 import json
 import secrets
 import string
@@ -15,6 +15,8 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 import aiohttp
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # ==============================================================================
 # 1. 환경변수 및 기본 설정 (.env 연동 완료)
@@ -25,9 +27,10 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
+# Supabase(PostgreSQL) 연결을 위한 DATABASE_URL 환경 변수 불러오기
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "! !디노")
-DB_PATH = os.getenv("DB_PATH", "shop.db")
 KST = timezone(timedelta(hours=9))
 
 intents = discord.Intents.default()
@@ -41,73 +44,119 @@ def fmt_won(n: int) -> str:
     return f"{n:,}원"
 
 # ==============================================================================
-# 2. 데이터베이스 매니저 (추상화 클래스)
+# 2. 데이터베이스 매니저 (PostgreSQL / Supabase용 추상화 클래스)
 # ==============================================================================
 class DB:
-    """반복되는 DB 연결/해제/커밋을 제거하기 위한 정적 매니저 클래스"""
+    """PostgreSQL(Supabase) 연결을 위한 정적 매니저 클래스"""
     @staticmethod
     def get_connection():
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        # DATABASE_URL을 이용해 Supabase PostgreSQL에 연결
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         return conn
 
     @staticmethod
-    def fetchone(query: str, *params) -> Optional[sqlite3.Row]:
+    def fetchone(query: str, *params) -> Optional[dict]:
+        # PostgreSQL 플레이스홀더(?)를 (%s)로 자동 변환
+        pg_query = query.replace("?", "%s")
         with DB.get_connection() as conn:
-            return conn.execute(query, params).fetchone()
+            with conn.cursor() as cur:
+                cur.execute(pg_query, params)
+                return cur.fetchone()
 
     @staticmethod
-    def fetchall(query: str, *params) -> list[sqlite3.Row]:
+    def fetchall(query: str, *params) -> list[dict]:
+        pg_query = query.replace("?", "%s")
         with DB.get_connection() as conn:
-            return conn.execute(query, params).fetchall()
+            with conn.cursor() as cur:
+                cur.execute(pg_query, params)
+                return cur.fetchall()
 
     @staticmethod
     def execute(query: str, *params) -> int:
+        pg_query = query.replace("?", "%s")
         with DB.get_connection() as conn:
-            cur = conn.execute(query, params)
-            conn.commit()
-            return cur.rowcount
+            with conn.cursor() as cur:
+                cur.execute(pg_query, params)
+                rowcount = cur.rowcount
+                conn.commit()
+                return rowcount
 
     @staticmethod
     def init_db():
+        # PostgreSQL 문법에 맞춘 테이블 생성 쿼리
         queries = [
             """CREATE TABLE IF NOT EXISTS prices (
-                guild_id INTEGER NOT NULL, item TEXT NOT NULL, category TEXT DEFAULT '기타',
+                guild_id BIGINT NOT NULL, item TEXT NOT NULL, category TEXT DEFAULT '기타',
                 price INTEGER NOT NULL DEFAULT 0, stock INTEGER DEFAULT -1, target_type TEXT DEFAULT 'standard',
-                is_permanent INTEGER DEFAULT 0, role_id INTEGER DEFAULT NULL, PRIMARY KEY (guild_id, item)
+                is_permanent INTEGER DEFAULT 0, role_id BIGINT DEFAULT NULL, PRIMARY KEY (guild_id, item)
             )""",
-            "CREATE TABLE IF NOT EXISTS item_stocks (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, item TEXT NOT NULL, content TEXT NOT NULL, is_used INTEGER DEFAULT 0)",
-            "CREATE TABLE IF NOT EXISTS permanent_stocks (guild_id INTEGER NOT NULL, item TEXT NOT NULL, content TEXT NOT NULL, PRIMARY KEY (guild_id, item))",
-            "CREATE TABLE IF NOT EXISTS user_points (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, points INTEGER DEFAULT 0, PRIMARY KEY (guild_id, user_id))",
+            """CREATE TABLE IF NOT EXISTS item_stocks (
+                id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, item TEXT NOT NULL, content TEXT NOT NULL, is_used INTEGER DEFAULT 0
+            )""",
+            """CREATE TABLE IF NOT EXISTS permanent_stocks (
+                guild_id BIGINT NOT NULL, item TEXT NOT NULL, content TEXT NOT NULL, PRIMARY KEY (guild_id, item)
+            )""",
+            """CREATE TABLE IF NOT EXISTS user_points (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, points INTEGER DEFAULT 0, PRIMARY KEY (guild_id, user_id)
+            )""",
             """CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, buyer_id INTEGER NOT NULL,
+                id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, buyer_id BIGINT NOT NULL,
                 buyer_name TEXT NOT NULL, item TEXT NOT NULL, quantity INTEGER NOT NULL, unit_price INTEGER NOT NULL,
                 total_price INTEGER NOT NULL, memo TEXT, created_at TEXT NOT NULL, recorded_by TEXT NOT NULL
             )""",
-            "CREATE TABLE IF NOT EXISTS registered_guilds (guild_id INTEGER PRIMARY KEY, registered_by INTEGER NOT NULL, registered_at TEXT NOT NULL, expires_at TEXT)",
-            "CREATE TABLE IF NOT EXISTS licenses (license_key TEXT PRIMARY KEY, duration_days INTEGER NOT NULL, is_used INTEGER DEFAULT 0, used_by_guild INTEGER, used_at TEXT)",
-            "CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER PRIMARY KEY, receipt_channel_id INTEGER, welcome_channel_id INTEGER, log_channel_id INTEGER, verify_role_id INTEGER, ticket_category_id INTEGER, ticket_role_id INTEGER, ticket_message TEXT)",
-            "CREATE TABLE IF NOT EXISTS bot_admins (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, added_by INTEGER NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (guild_id, user_id))",
-            "CREATE TABLE IF NOT EXISTS server_admins (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, added_by INTEGER NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (guild_id, user_id))",
-            "CREATE TABLE IF NOT EXISTS bot_sellers (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, added_by INTEGER NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (guild_id, user_id))",
-            "CREATE TABLE IF NOT EXISTS ticket_logs (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, opened_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS user_join_counts (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, join_count INTEGER DEFAULT 0, PRIMARY KEY (guild_id, user_id))",
-            "CREATE TABLE IF NOT EXISTS verify_codes (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, code TEXT NOT NULL, PRIMARY KEY (guild_id, user_id))",
-            "CREATE TABLE IF NOT EXISTS server_backups (backup_key TEXT PRIMARY KEY, guild_id INTEGER NOT NULL, backup_data TEXT NOT NULL, created_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS withdraw_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount INTEGER NOT NULL, status TEXT DEFAULT '대기중', created_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS user_tokens (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, PRIMARY KEY (guild_id, user_id))",
-            "CREATE TABLE IF NOT EXISTS recovery_keys (key TEXT PRIMARY KEY, guild_id INTEGER NOT NULL, created_by INTEGER NOT NULL, created_at TEXT NOT NULL)"
+            """CREATE TABLE IF NOT EXISTS registered_guilds (
+                guild_id BIGINT PRIMARY KEY, registered_by BIGINT NOT NULL, registered_at TEXT NOT NULL, expires_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS licenses (
+                license_key TEXT PRIMARY KEY, duration_days INTEGER NOT NULL, is_used INTEGER DEFAULT 0, used_by_guild BIGINT, used_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id BIGINT PRIMARY KEY, receipt_channel_id BIGINT, welcome_channel_id BIGINT, log_channel_id BIGINT, verify_role_id BIGINT, ticket_category_id BIGINT, ticket_role_id BIGINT, ticket_message TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS bot_admins (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, added_by BIGINT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (guild_id, user_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS server_admins (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, added_by BIGINT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (guild_id, user_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS bot_sellers (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, added_by BIGINT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (guild_id, user_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS ticket_logs (
+                channel_id BIGINT PRIMARY KEY, guild_id BIGINT NOT NULL, owner_id BIGINT NOT NULL, opened_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS user_join_counts (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, join_count INTEGER DEFAULT 0, PRIMARY KEY (guild_id, user_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS verify_codes (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, code TEXT NOT NULL, PRIMARY KEY (guild_id, user_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS server_backups (
+                backup_key TEXT PRIMARY KEY, guild_id BIGINT NOT NULL, backup_data TEXT NOT NULL, created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS withdraw_requests (
+                id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, amount INTEGER NOT NULL, status TEXT DEFAULT '대기중', created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS suggestions (
+                id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS user_tokens (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, PRIMARY KEY (guild_id, user_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS recovery_keys (
+                key TEXT PRIMARY KEY, guild_id BIGINT NOT NULL, created_by BIGINT NOT NULL, created_at TEXT NOT NULL
+            )"""
         ]
         with DB.get_connection() as conn:
-            for q in queries:
-                conn.execute(q)
-            try:
-                conn.execute("ALTER TABLE guild_settings ADD COLUMN ticket_message TEXT")
-            except sqlite3.OperationalError:
-                pass
-            conn.commit()
+            with conn.cursor() as cur:
+                for q in queries:
+                    cur.execute(q)
+                # 컬럼 추가 안전 장치
+                try:
+                    cur.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS ticket_message TEXT")
+                except Exception:
+                    conn.rollback()
+                conn.commit()
 
 # ==============================================================================
 # 3. 유틸리티 및 권한 검사 함수
@@ -220,21 +269,23 @@ class MainVendingView(discord.ui.View):
             async def item_callback(i: discord.Interaction):
                 item_name = item_select.values[0]
                 with DB.get_connection() as conn:
-                    it_info = conn.execute("SELECT price, stock FROM prices WHERE guild_id=? AND item=?", (i.guild_id, item_name)).fetchone()
-                    if not it_info: return await i.response.send_message("❌ 상품을 찾을 수 없습니다.", ephemeral=True)
-                    if it_info["stock"] != -1 and it_info["stock"] <= 0: return await i.response.send_message("❌ 품절된 상품입니다.", ephemeral=True)
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT price, stock FROM prices WHERE guild_id=%s AND item=%s", (i.guild_id, item_name))
+                        it_info = cur.fetchone()
+                        if not it_info: return await i.response.send_message("❌ 상품을 찾을 수 없습니다.", ephemeral=True)
+                        if it_info["stock"] != -1 and it_info["stock"] <= 0: return await i.response.send_message("❌ 품절된 상품입니다.", ephemeral=True)
 
-                    user_pts = get_user_points(i.guild_id, i.user.id)
-                    if user_pts < it_info["price"]: return await i.response.send_message("❌ 포인트가 부족합니다.", ephemeral=True)
+                        user_pts = get_user_points(i.guild_id, i.user.id)
+                        if user_pts < it_info["price"]: return await i.response.send_message("❌ 포인트가 부족합니다.", ephemeral=True)
 
-                    if it_info["stock"] != -1:
-                        cur = conn.execute("UPDATE prices SET stock=stock-1 WHERE guild_id=? AND item=? AND stock>0", (i.guild_id, item_name))
-                        if cur.rowcount == 0: return await i.response.send_message("❌ 방금 품절되었습니다.", ephemeral=True)
+                        if it_info["stock"] != -1:
+                            cur.execute("UPDATE prices SET stock=stock-1 WHERE guild_id=%s AND item=%s AND stock>0", (i.guild_id, item_name))
+                            if cur.rowcount == 0: return await i.response.send_message("❌ 방금 품절되었습니다.", ephemeral=True)
 
-                    conn.execute("UPDATE user_points SET points=points-? WHERE guild_id=? AND user_id=?", (it_info["price"], i.guild_id, i.user.id))
-                    conn.execute("INSERT INTO transactions (guild_id, buyer_id, buyer_name, item, quantity, unit_price, total_price, memo, created_at, recorded_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                 (i.guild_id, i.user.id, i.user.display_name, item_name, 1, it_info["price"], it_info["price"], "자판기 구매", now_kst_str(), "System"))
-                    conn.commit()
+                        cur.execute("UPDATE user_points SET points=points-%s WHERE guild_id=%s AND user_id=%s", (it_info["price"], i.guild_id, i.user.id))
+                        cur.execute("INSERT INTO transactions (guild_id, buyer_id, buyer_name, item, quantity, unit_price, total_price, memo, created_at, recorded_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                     (i.guild_id, i.user.id, i.user.display_name, item_name, 1, it_info["price"], it_info["price"], "자판기 구매", now_kst_str(), "System"))
+                        conn.commit()
 
                 res = await send_purchase_receipt(i.guild, i.user, item_name, 1, it_info["price"])
                 msg = "✅ 구매 완료! " + ("지정 채널에 영수증 발급됨." if res=="channel" else "개인 DM으로 영수증 발송됨." if res=="dm" else "DM 전송 실패 (구매내역 확인요망).")
@@ -403,7 +454,14 @@ class SystemCog(commands.Cog):
         
         exp_str = (start_dt + timedelta(days=lic["duration_days"])).strftime("%Y-%m-%d %H:%M:%S")
         DB.execute("UPDATE licenses SET is_used=1, used_by_guild=?, used_at=? WHERE license_key=?", interaction.guild_id, now_kst_str(), 라이센스키)
-        DB.execute("INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at) VALUES (?,?,?,?) ON CONFLICT DO UPDATE SET expires_at=?", interaction.guild_id, interaction.user.id, now_kst_str(), exp_str, exp_str)
+        
+        # PostgreSQL Upsert 구문 (ON CONFLICT)
+        DB.execute("""
+            INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at) 
+            VALUES (?,?,?,?) 
+            ON CONFLICT (guild_id) DO UPDATE SET expires_at=EXCLUDED.expires_at
+        """, interaction.guild_id, interaction.user.id, now_kst_str(), exp_str)
+        
         await interaction.response.send_message(f"🎉 라이센스 연장 완료! (만료일: {exp_str})", ephemeral=True)
 
     @app_commands.command(name="서버정보", description="서버 상태와 라이센스를 확인합니다.")
@@ -566,7 +624,8 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="내정보", description="내 활동 프로필을 확인합니다.")
     async def my_info(self, interaction: discord.Interaction):
         pts = get_user_points(interaction.guild_id, interaction.user.id)
-        tx = DB.fetchone("SELECT COUNT(*) as c FROM transactions WHERE guild_id=? AND buyer_id=?", interaction.guild_id, interaction.user.id)["c"]
+        tx_row = DB.fetchone("SELECT COUNT(*) as c FROM transactions WHERE guild_id=? AND buyer_id=?", interaction.guild_id, interaction.user.id)
+        tx = tx_row["c"] if tx_row else 0
         embed = discord.Embed(title=f"👤 {interaction.user.display_name} 님 정보", color=discord.Color.blue())
         embed.add_field(name="💰 보유 포인트", value=fmt_won(pts), inline=True)
         embed.add_field(name="🛒 누적 구매", value=f"{tx}회", inline=True)
@@ -584,7 +643,7 @@ class EconomyCog(commands.Cog):
     async def withdraw_pts(self, interaction: discord.Interaction, 금액: int):
         if 금액 <= 0 or get_user_points(interaction.guild_id, interaction.user.id) < 금액:
             return await interaction.response.send_message("❌ 올바른 금액 또는 잔액 부족.", ephemeral=True)
-        DB.execute("INSERT INTO withdraw_requests (guild_id, user_id, amount, created_at) VALUES (?,?,?,?)", interaction.guild_id, interaction.user.id, 금액, now_kst_str())
+        DB.execute("INSERT INTO withdraw_requests (guild_id, user_id, amount, created_at) VALUES (?,?,?,?)", interaction.guild_id, interaction.user.id,금액, now_kst_str())
         await interaction.response.send_message(f"✅ {fmt_won(금액)} 출금 신청 완료.", ephemeral=True)
 
     @app_commands.command(name="송금하기", description="포인트를 선물합니다.")
@@ -592,19 +651,25 @@ class EconomyCog(commands.Cog):
         if 금액 <= 0 or get_user_points(interaction.guild_id, interaction.user.id) < 금액 or 유저.bot or 유저 == interaction.user:
             return await interaction.response.send_message("❌ 송금 불가 조건입니다.", ephemeral=True)
         DB.execute("UPDATE user_points SET points=points-? WHERE guild_id=? AND user_id=?", 금액, interaction.guild_id, interaction.user.id)
-        DB.execute("INSERT INTO user_points (guild_id, user_id, points) VALUES (?,?,?) ON CONFLICT DO UPDATE SET points=points+?", interaction.guild_id, 유저.id, 금액, 금액)
+        DB.execute("""
+            INSERT INTO user_points (guild_id, user_id, points) VALUES (?,?,?) 
+            ON CONFLICT (guild_id, user_id) DO UPDATE SET points = user_points.points + EXCLUDED.points
+        """, interaction.guild_id, 유저.id, 금액)
         await interaction.response.send_message(f"✅ {유저.mention}님께 {fmt_won(금액)} 송금 완료.", ephemeral=True)
 
     @app_commands.command(name="포인트지급", description="관리자가 포인트를 지급합니다.")
     @seller_only()
     async def admin_give_pts(self, interaction: discord.Interaction, 유저: discord.Member, 금액: int):
-        DB.execute("INSERT INTO user_points (guild_id, user_id, points) VALUES (?,?,?) ON CONFLICT DO UPDATE SET points=points+?", interaction.guild_id, 유저.id, 금액, 금액)
+        DB.execute("""
+            INSERT INTO user_points (guild_id, user_id, points) VALUES (?,?,?) 
+            ON CONFLICT (guild_id, user_id) DO UPDATE SET points = user_points.points + EXCLUDED.points
+        """, interaction.guild_id, 유저.id, 금액)
         await interaction.response.send_message(f"✅ {유저.mention}님께 {fmt_won(금액)} 지급 완료.", ephemeral=True)
 
     @app_commands.command(name="포인트차감", description="관리자가 포인트를 차감합니다.")
     @seller_only()
     async def admin_sub_pts(self, interaction: discord.Interaction, 유저: discord.Member, 금액: int):
-        DB.execute("UPDATE user_points SET points=MAX(0, points-?) WHERE guild_id=? AND user_id=?", 금액, interaction.guild_id, 유저.id)
+        DB.execute("UPDATE user_points SET points=GREATEST(0, points-?) WHERE guild_id=? AND user_id=?",금액, interaction.guild_id, 유저.id)
         await interaction.response.send_message(f"✅ {유저.mention}님 포인트 {fmt_won(금액)} 차감 완료.", ephemeral=True)
 
 class ShopCog(commands.Cog):
@@ -629,7 +694,10 @@ class ShopCog(commands.Cog):
     @app_commands.command(name="상품등록", description="새 상품을 상점에 올립니다.")
     @seller_only()
     async def add_item(self, interaction: discord.Interaction, 카테고리: str, 상품명: str, 가격: int, 재고: int = -1):
-        DB.execute("INSERT INTO prices (guild_id, item, category, price, stock) VALUES (?,?,?,?,?) ON CONFLICT DO UPDATE SET category=?, price=?, stock=?", interaction.guild_id, 상품명, 카테고리, 가격, 재고, 카테고리, 가격, 재고)
+        DB.execute("""
+            INSERT INTO prices (guild_id, item, category, price, stock) VALUES (?,?,?,?,?) 
+            ON CONFLICT (guild_id, item) DO UPDATE SET category=EXCLUDED.category, price=EXCLUDED.price, stock=EXCLUDED.stock
+        """, interaction.guild_id, 상품명, 카테고리, 가격, 재고)
         await interaction.response.send_message(f"✅ [{카테고리}] {상품명} ({fmt_won(가격)}) 등록 완료.", ephemeral=True)
 
     @app_commands.command(name="재고수정", description="상품 재고를 특정 수량으로 덮어씁니다.")
@@ -649,7 +717,7 @@ class ShopCog(commands.Cog):
     @app_commands.command(name="재고차감", description="상품 재고를 줄립니다.")
     @seller_only()
     async def sub_stock(self, interaction: discord.Interaction, 상품명: str, 수량: int):
-        res = DB.execute("UPDATE prices SET stock=MAX(0, stock-?) WHERE guild_id=? AND item=? AND stock != -1", 수량, interaction.guild_id, 상품명)
+        res = DB.execute("UPDATE prices SET stock=GREATEST(0, stock-?) WHERE guild_id=? AND item=? AND stock != -1", 수량, interaction.guild_id, 상품명)
         if res == 0: return await interaction.response.send_message("❌ 무제한 상품이거나 상품이 없습니다.", ephemeral=True)
         await interaction.response.send_message(f"✅ {상품명} 재고 {수량}개 차감됨.", ephemeral=True)
 
@@ -697,14 +765,13 @@ class TicketCog(commands.Cog):
         cat_id = 카테고리.id if 카테고리 else None
         role_id = 역할.id if 역할 else None
 
-        DB.execute(
-            "INSERT INTO guild_settings (guild_id, ticket_category_id, ticket_role_id, ticket_message) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET "
-            "ticket_category_id = COALESCE(?, ticket_category_id), "
-            "ticket_role_id = COALESCE(?, ticket_role_id), "
-            "ticket_message = COALESCE(?, ticket_message)",
-            interaction.guild_id, cat_id, role_id, 메시지, cat_id, role_id, 메시지
-        )
+        DB.execute("""
+            INSERT INTO guild_settings (guild_id, ticket_category_id, ticket_role_id, ticket_message) VALUES (?, ?, ?, ?) 
+            ON CONFLICT (guild_id) DO UPDATE SET 
+            ticket_category_id = COALESCE(EXCLUDED.ticket_category_id, guild_settings.ticket_category_id), 
+            ticket_role_id = COALESCE(EXCLUDED.ticket_role_id, guild_settings.ticket_role_id), 
+            ticket_message = COALESCE(EXCLUDED.ticket_message, guild_settings.ticket_message)
+        """, interaction.guild_id, cat_id, role_id, 메시지)
 
         msg = "⚙️ **티켓 설정이 성공적으로 업데이트되었습니다!**\n"
         if 카테고리: msg += f"• 생성 카테고리: `{카테고리.name}`\n"
@@ -718,37 +785,46 @@ class AdminSetupCog(commands.Cog):
     @app_commands.command(name="봇관리자등록", description="봇 권한 관리자를 지정합니다.")
     @admin_only()
     async def add_bot_admin(self, interaction: discord.Interaction, 유저: discord.Member):
-        DB.execute("INSERT INTO bot_admins (guild_id, user_id, added_by, added_at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING", interaction.guild_id, 유저.id, interaction.user.id, now_kst_str())
+        DB.execute("INSERT INTO bot_admins (guild_id, user_id, added_by, added_at) VALUES (?,?,?,?) ON CONFLICT (guild_id, user_id) DO NOTHING", interaction.guild_id, 유저.id, interaction.user.id, now_kst_str())
         await interaction.response.send_message(f"✅ {유저.mention} 봇 관리자 등록 완료.", ephemeral=True)
 
     @app_commands.command(name="서버관리자등록", description="서버 관리자를 지정합니다.")
     @admin_only()
     async def add_srv_admin(self, interaction: discord.Interaction, 유저: discord.Member):
-        DB.execute("INSERT INTO server_admins (guild_id, user_id, added_by, added_at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING", interaction.guild_id, 유저.id, interaction.user.id, now_kst_str())
+        DB.execute("INSERT INTO server_admins (guild_id, user_id, added_by, added_at) VALUES (?,?,?,?) ON CONFLICT (guild_id, user_id) DO NOTHING", interaction.guild_id, 유저.id, interaction.user.id, now_kst_str())
         await interaction.response.send_message(f"✅ {유저.mention} 서버 관리자 등록 완료.", ephemeral=True)
 
     @app_commands.command(name="판매자등록", description="상점 판매자를 등록합니다.")
     @admin_only()
     async def add_seller(self, interaction: discord.Interaction, 유저: discord.Member):
-        DB.execute("INSERT INTO bot_sellers (guild_id, user_id, added_by, added_at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING", interaction.guild_id, 유저.id, interaction.user.id, now_kst_str())
+        DB.execute("INSERT INTO bot_sellers (guild_id, user_id, added_by, added_at) VALUES (?,?,?,?) ON CONFLICT (guild_id, user_id) DO NOTHING", interaction.guild_id, 유저.id, interaction.user.id, now_kst_str())
         await interaction.response.send_message(f"✅ {유저.mention} 판매자 등록 완료.", ephemeral=True)
 
     @app_commands.command(name="영수증채널설정", description="구매 영수증 로그 채널 지정")
     @admin_only()
     async def set_receipt(self, interaction: discord.Interaction, 채널: discord.TextChannel):
-        DB.execute("INSERT INTO guild_settings (guild_id, receipt_channel_id) VALUES (?,?) ON CONFLICT DO UPDATE SET receipt_channel_id=?", interaction.guild_id, 채널.id, 채널.id)
+        DB.execute("""
+            INSERT INTO guild_settings (guild_id, receipt_channel_id) VALUES (?,?) 
+            ON CONFLICT (guild_id) DO UPDATE SET receipt_channel_id=EXCLUDED.receipt_channel_id
+        """, interaction.guild_id, 채널.id)
         await interaction.response.send_message(f"✅ 영수증 채널 설정: {채널.mention}", ephemeral=True)
 
     @app_commands.command(name="입퇴장로그설정", description="유저 입퇴장/밴 알림 채널 지정")
     @admin_only()
     async def set_log(self, interaction: discord.Interaction, 채널: discord.TextChannel):
-        DB.execute("INSERT INTO guild_settings (guild_id, log_channel_id) VALUES (?,?) ON CONFLICT DO UPDATE SET log_channel_id=?", interaction.guild_id, 채널.id, 채널.id)
+        DB.execute("""
+            INSERT INTO guild_settings (guild_id, log_channel_id) VALUES (?,?) 
+            ON CONFLICT (guild_id) DO UPDATE SET log_channel_id=EXCLUDED.log_channel_id
+        """, interaction.guild_id, 채널.id)
         await interaction.response.send_message(f"✅ 로그 채널 설정: {채널.mention}", ephemeral=True)
 
     @app_commands.command(name="인증역할설정", description="인증 완료 시 줄 역할")
     @admin_only()
     async def set_vrole(self, interaction: discord.Interaction, 역할: discord.Role):
-        DB.execute("INSERT INTO guild_settings (guild_id, verify_role_id) VALUES (?,?) ON CONFLICT DO UPDATE SET verify_role_id=?", interaction.guild_id, 역할.id, 역할.id)
+        DB.execute("""
+            INSERT INTO guild_settings (guild_id, verify_role_id) VALUES (?,?) 
+            ON CONFLICT (guild_id) DO UPDATE SET verify_role_id=EXCLUDED.verify_role_id
+        """, interaction.guild_id, 역할.id)
         await interaction.response.send_message(f"✅ 인증 역할 설정: {역할.name}", ephemeral=True)
 
     @app_commands.command(name="인증패널전송", description="유저 인증 버튼 설치")
@@ -767,7 +843,10 @@ class OwnerPrefixCog(commands.Cog):
         if not (await self.bot.is_owner(ctx.author) or is_bot_admin(ctx.author, ctx.guild.id)): return
         tgt = int(gid) if gid else ctx.guild.id
         exp = (datetime.now(KST) + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-        DB.execute("INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at) VALUES (?,?,?,?) ON CONFLICT DO UPDATE SET expires_at=?", tgt, ctx.author.id, now_kst_str(), exp, exp)
+        DB.execute("""
+            INSERT INTO registered_guilds (guild_id, registered_by, registered_at, expires_at) VALUES (?,?,?,?) 
+            ON CONFLICT (guild_id) DO UPDATE SET expires_at=EXCLUDED.expires_at
+        """, tgt, ctx.author.id, now_kst_str(), exp, exp)
         await ctx.send(f"✅ 서버({tgt}) 등록됨. 만료: {exp}")
 
     @commands.command(name="강제동기화")
@@ -823,7 +902,10 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    DB.execute("INSERT INTO user_join_counts (guild_id, user_id, join_count) VALUES (?, ?, 1) ON CONFLICT DO UPDATE SET join_count = join_count + 1", member.guild.id, member.id)
+    DB.execute("""
+        INSERT INTO user_join_counts (guild_id, user_id, join_count) VALUES (?, ?, 1) 
+        ON CONFLICT (guild_id, user_id) DO UPDATE SET join_count = user_join_counts.join_count + 1
+    """, member.guild.id, member.id)
     row_cnt = DB.fetchone("SELECT join_count FROM user_join_counts WHERE guild_id=? AND user_id=?", member.guild.id, member.id)
     join_count = row_cnt["join_count"] if row_cnt else 1
 
