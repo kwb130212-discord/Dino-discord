@@ -8,11 +8,13 @@ import random
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from urllib.parse import quote
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+import aiohttp
 
 # ==============================================================================
 # 1. 환경변수 및 기본 설정 (.env 연동 완료)
@@ -94,7 +96,9 @@ class DB:
             "CREATE TABLE IF NOT EXISTS verify_codes (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, code TEXT NOT NULL, PRIMARY KEY (guild_id, user_id))",
             "CREATE TABLE IF NOT EXISTS server_backups (backup_key TEXT PRIMARY KEY, guild_id INTEGER NOT NULL, backup_data TEXT NOT NULL, created_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS withdraw_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount INTEGER NOT NULL, status TEXT DEFAULT '대기중', created_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS user_tokens (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, PRIMARY KEY (guild_id, user_id))",
+            "CREATE TABLE IF NOT EXISTS recovery_keys (key TEXT PRIMARY KEY, guild_id INTEGER NOT NULL, created_by INTEGER NOT NULL, created_at TEXT NOT NULL)"
         ]
         with DB.get_connection() as conn:
             for q in queries:
@@ -173,40 +177,24 @@ def seller_only():
 # ==============================================================================
 # 4. UI 컴포넌트 (Views & Modals)
 # ==============================================================================
-class VerifyModal(discord.ui.Modal, title="서버 회원 인증"):
-    def __init__(self, target_code: str):
-        super().__init__()
-        self.code_input = discord.ui.TextInput(
-            label="인증 번호 입력", placeholder=f"[{target_code}] 입력", min_length=4, max_length=4, required=True
-        )
-        self.add_item(self.code_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        entered = self.code_input.value.strip()
-        row = DB.fetchone("SELECT code FROM verify_codes WHERE guild_id = ? AND user_id = ?", interaction.guild.id, interaction.user.id)
-        if not row or entered != row["code"]:
-            return await interaction.response.send_message("❌ 인증 번호가 일치하지 않습니다.", ephemeral=True)
-
-        set_row = DB.fetchone("SELECT verify_role_id FROM guild_settings WHERE guild_id = ?", interaction.guild.id)
-        role = interaction.guild.get_role(set_row["verify_role_id"]) if set_row and set_row["verify_role_id"] else None
-
-        if role:
-            try:
-                await interaction.user.add_roles(role)
-                DB.execute("DELETE FROM verify_codes WHERE guild_id = ? AND user_id = ?", interaction.guild.id, interaction.user.id)
-                await interaction.response.send_message(f"✅ 인증 완료! `{role.name}` 역할이 지급되었습니다.", ephemeral=True)
-            except discord.Forbidden:
-                await interaction.response.send_message("⚠️ 봇의 권한/역할 순위가 낮아 지급할 수 없습니다.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ 서버에 인증 역할이 설정되지 않았습니다.", ephemeral=True)
-
 class VerifyView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="인증하기 🔓", style=discord.ButtonStyle.green, custom_id="verify_button")
-    async def verify_btn(self, interaction: discord.Interaction, btn: discord.ui.Button):
-        code = "".join(random.choices(string.digits, k=4))
-        DB.execute("INSERT INTO verify_codes (guild_id, user_id, code) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET code = ?", interaction.guild.id, interaction.user.id, code, code)
-        await interaction.response.send_modal(VerifyModal(target_code=code))
+    def __init__(self):
+        super().__init__(timeout=None)
+        client_id = CLIENT_ID or os.getenv("DISCORD_CLIENT_ID")
+        redirect_uri = REDIRECT_URI or os.getenv("REDIRECT_URI", "https://dino-web-2trw.onrender.com/auth/callback")
+        
+        oauth_url = (
+            f"https://discord.com/api/oauth2/authorize"
+            f"?client_id={client_id}"
+            f"&redirect_uri={quote(redirect_uri, safe='')}"
+            f"&response_type=code"
+            f"&scope=identify%20guilds.join"
+        )
+        self.add_item(discord.ui.Button(
+            label="웹 연동 인증하기 🔓", 
+            style=discord.ButtonStyle.link, 
+            url=oauth_url
+        ))
 
 class MainVendingView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -385,7 +373,6 @@ class SystemCog(commands.Cog):
 
     @app_commands.command(name="라이센스생성", description="새로운 서버 라이센스 키를 생성합니다. (봇 주인 전용)")
     async def create_license(self, interaction: discord.Interaction, 일수: int):
-        # 봇 주인(Owner)만 생성 가능하도록 제한
         if not await interaction.client.is_owner(interaction.user):
             return await interaction.response.send_message("❌ 이 명령어는 봇 주인만 사용할 수 있습니다.", ephemeral=True)
 
@@ -427,6 +414,62 @@ class SystemCog(commands.Cog):
         embed.add_field(name="라이센스 승인", value="✅ 승인됨" if is_reg else "❌ 미승인", inline=True)
         if exp and exp["expires_at"]: embed.add_field(name="만료일", value=exp["expires_at"], inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="복구키생성", description="인원 복구를 위한 복구 키를 생성합니다.")
+    @admin_only()
+    async def create_recovery_key(self, interaction: discord.Interaction):
+        chars = string.ascii_uppercase + string.digits
+        key_part = lambda: "".join(random.choices(chars, k=4))
+        rec_key = f"REC-{key_part()}-{key_part()}"
+        
+        DB.execute("INSERT INTO recovery_keys (key, guild_id, created_by, created_at) VALUES (?, ?, ?, ?)", 
+                   rec_key, interaction.guild_id, interaction.user.id, now_kst_str())
+        
+        embed = discord.Embed(title="🔑 인원 복구 키 생성 완료", color=discord.Color.green())
+        embed.add_field(name="복구 키", value=f"`{rec_key}`", inline=False)
+        embed.description = "이 키를 사용하여 연동된 유저들을 현재 서버로 다시 복구할 수 있습니다."
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="복구키사용", description="복구 키를 사용하여 인증된 유저들을 서버로 복구합니다.")
+    @admin_only()
+    async def use_recovery_key(self, interaction: discord.Interaction, 복구키: str):
+        row = DB.fetchone("SELECT * FROM recovery_keys WHERE key = ?", 복구키)
+        if not row:
+            return await interaction.response.send_message("❌ 유효하지 않은 복구 키입니다.", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        tokens = DB.fetchall("SELECT user_id, access_token FROM user_tokens WHERE guild_id = ?", row["guild_id"])
+        if not tokens:
+            return await interaction.followup.send("❌ 복구할 수 있는 연동된 유저 토큰이 없습니다.", ephemeral=True)
+        
+        success_count = 0
+        fail_count = 0
+        guild = interaction.guild
+        headers = {
+            "Authorization": f"Bot {interaction.client.http.token}",
+            "Content-Type": "application/json"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            for t in tokens:
+                user_id = t["user_id"]
+                access_token = t["access_token"]
+                url = f"https://discord.com/api/v10/guilds/{guild.id}/members/{user_id}"
+                payload = {"access_token": access_token}
+                
+                async with session.put(url, headers=headers, json=payload) as resp:
+                    if resp.status in (201, 204):
+                        success_count += 1
+                    else:
+                        fail_count += 1
+        
+        await interaction.followup.send(
+            f"✅ 인원 복구 작업 완료!\n"
+            f"• 성공: {success_count}명\n"
+            f"• 실패/만료: {fail_count}명", 
+            ephemeral=True
+        )
 
     @app_commands.command(name="서버백업", description="상점 및 서버의 역할, 카테고리, 채널 구조를 백업합니다.")
     @admin_only()
@@ -618,7 +661,6 @@ class ShopCog(commands.Cog):
         await interaction.response.send_message("✅ 자판기 전송 완료", ephemeral=True)
 
 class TicketCog(commands.Cog):
-    """티켓 패널 및 설정 모듈"""
     def __init__(self, bot): self.bot = bot
 
     @app_commands.command(name="티켓패널", description="고급 티켓 생성 패널을 현재 채널에 전송합니다.")
@@ -758,18 +800,15 @@ class DinoBot(commands.Bot):
 
 bot = DinoBot()
 
-# 🔒 등록된 서버 및 라이센스가 유효한 경우에만 슬래시 명령어 실행 가능하도록 제한
 @bot.tree.interaction_check
 async def global_guild_check(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         await interaction.response.send_message("❌ DM에서는 이 명령어를 사용할 수 없습니다.", ephemeral=True)
         return False
     
-    # 미등록 서버에서도 '라이센스등록' 명령어는 사용할 수 있어야 키를 입력할 수 있습니다.
     if interaction.command and interaction.command.name == "라이센스등록":
         return True
         
-    # 라이센스 및 서버 등록 여부 확인
     if not is_guild_registered(interaction.guild.id):
         await interaction.response.send_message("⚠️ **라이센스 만료 또는 승인되지 않은 서버입니다.**\n봇의 기능을 사용하려면 `/라이센스등록` 명령어로 라이센스를 먼저 등록해 주세요!", ephemeral=True)
         return False
