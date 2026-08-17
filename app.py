@@ -241,7 +241,7 @@ class DinoBot(commands.Bot):
         print(f"로그인 완료: {self.user} (ID: {self.user.id})")
         try:
             synced = await self.tree.sync()
-            print(f"슬래시 명령어 동기화 완료: {len(synced)}개")
+            print(f"글로벌 슬래시 명령어 동기화 완료: {len(synced)}개")
         except Exception as e:
             print(f"동기화 에러: {e}")
 
@@ -258,5 +258,4 @@ app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    # ⚠️ 디스호스트(app.py) 환경에 맞게 "app:app"으로 설정됨
     uvicorn.run("app:app", host="0.0.0.0", port=port)
