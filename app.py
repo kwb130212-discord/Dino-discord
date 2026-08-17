@@ -258,4 +258,5 @@ app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    # ⚠️ 디스호스트(app.py) 환경에 맞게 "app:app"으로 설정됨
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
