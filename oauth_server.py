@@ -5,6 +5,7 @@ import secrets
 import time
 from urllib.parse import urlencode
 
+import discord
 from aiohttp import ClientSession, web
 
 API_BASE = "https://discord.com/api/v10"
@@ -63,7 +64,7 @@ def create_app(bot):
     async def roles(request):
         try:
             payload = await request.json()
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, web.ContentTypeError):
             return _json({"error": "invalid_json"}, 400)
         key = str(payload.get("key", "")).strip()
         if not key:
@@ -86,7 +87,7 @@ def create_app(bot):
             return _json({"error": "oauth_not_configured"}, 503)
         try:
             payload = await request.json()
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, web.ContentTypeError):
             return _json({"error": "invalid_json"}, 400)
         key = str(payload.get("key", "")).strip()
         role_id = str(payload.get("role_id", "")).strip()
@@ -172,7 +173,7 @@ def create_app(bot):
             else:
                 try:
                     await member.add_roles(role, reason="Recovery key OAuth2")
-                except Exception:
+                except (discord.Forbidden, discord.HTTPException):
                     return web.Response(text="The user is already in the server, but the role could not be assigned.", status=502)
 
         if state_row["key_type"] == "one_time":
@@ -194,8 +195,6 @@ async def start_server(bot):
     if not _configured():
         print("OAuth2 recovery server disabled: set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_REDIRECT_URI, PUBLIC_BACKEND_URL and WEB_ORIGIN.")
         return None
-    from aiohttp import web
-
     app = create_app(bot)
     runner = web.AppRunner(app)
     await runner.setup()
