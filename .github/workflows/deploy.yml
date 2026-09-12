@@ -1,0 +1,12 @@
+name: Deploy to Bot Hosting
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment trigger
+        run: echo "main push detected - configure the hosting service to redeploy this repository."
