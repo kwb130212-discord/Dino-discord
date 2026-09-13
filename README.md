@@ -1,121 +1,127 @@
 # 🎮 클랜 디스코드 봇
 
-게임 클랜 서버를 위한 올인원 Discord 봇입니다.
+게임 클랜 서버를 위한 올인원 디스코드 봇
 
-## ✨ 기능
+---
+
+## ✨ 기능 목록
 
 | 카테고리 | 기능 |
 |---|---|
 | 🔐 인증 | 4자리 캡챠 + 질문형 인증, 실패 시 자동 킥 |
-| 📋 로그 | 멤버 입퇴장 로그, 선택적 자동 밴 |
-| 🛡️ 보안 | 레이드 보호, 스팸 감지, 경고/타임아웃 |
-| 📺 유튜브 | RSS 기반 새 영상 자동 알림 |
-| ⚔️ 내전 | 참가/나가기 버튼, 랜덤 팀 배정 |
+| 📋 로그 | 멤버 입퇴장 로그, 자동 밴 |
+| 🛡️ 보안 | 레이드 보호, 스팸 감지, 경고 시스템 |
+| 📺 유튜브 | 새 영상 자동 알림 (RSS, API 키 불필요) |
+| ⚔️ 내전 | 참가 버튼형 내전 모집, 자동 팀 배정 |
 | 🎮 팀짜기 | 음성 채널 인원 랜덤 팀 배정 |
 | 🏆 클랜 | 클랜 정보 등록/조회 |
 | 🔧 관리 | 청소, 공지, 서버/유저 정보 |
 
-## 🚀 설치
+---
 
-### 1. Discord Developer Portal
+## 🚀 설치 방법
 
-Bot을 생성하고 필요한 Privileged Gateway Intents를 활성화하세요.
+### 1. Discord Developer Portal 설정
+1. https://discord.com/developers/applications 접속
+2. **New Application** 클릭
+3. **Bot** 탭 → **Add Bot**
+4. **Privileged Gateway Intents** 모두 활성화:
+   - Server Members Intent ✅
+   - Message Content Intent ✅
+   - Presence Intent ✅
+5. 토큰 복사 → `.env` 파일에 저장
 
-- Server Members Intent
-- Message Content Intent
-- Presence Intent
+### 2. 봇 서버 초대
+OAuth2 → URL Generator에서:
+- Scopes: `bot`, `applications.commands`
+- Permissions: `Administrator` (또는 필요한 권한만)
 
-### 2. 환경변수
-
-`.env` 파일에 다음을 설정합니다.
-
-```env
-DISCORD_TOKEN=YOUR_BOT_TOKEN
-```
-
-`.env`는 절대 Git에 커밋하지 마세요.
-
-### 3. 실행
-
+### 3. 로컬 실행
 ```bash
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
+cp .env.example .env
+# .env 파일에 토큰 입력
 python main.py
 ```
 
-## 📋 초기 설정
+---
 
-서버에 봇을 초대한 뒤 다음 순서로 설정할 수 있습니다.
+## ☁️ 무료 호스팅 (카드 불필요)
 
-```text
-/인증설정
-/로그설정
-/보안설정
-/클랜등록
+### 추천 1: **bot-hosting.net** ⭐
+- 무료 1봇, 카드 없음, 24/7
+- https://bot-hosting.net
+- GitHub 연동 지원
+
+### 추천 2: **HeavenCloud** ⭐
+- 512MB RAM, 1GB SSD, 24/7, 카드 없음
+- https://heavencloud.in
+- Pterodactyl 패널
+
+### 추천 3: **dishost.org**
+- Python 지원, 무료, GitHub push 자동 배포
+- https://dishost.org
+
+### Dishost 배포 방법
+1. https://dishost.org 가입
+2. GitHub 레포 연결
+3. Start Command: `python main.py`
+4. Environment Variables에 `DISCORD_TOKEN` 추가
+5. 배포 완료 → main 브랜치 push 시 자동 재배포
+
+---
+
+## 📋 봇 초기 설정 명령어
+
+서버에 봇 추가 후 순서대로 실행:
+
+```
+/인증설정       - 인증 채널 및 역할 생성
+/로그설정       - 입퇴장 로그 채널 생성
+/보안설정       - 보안 알림 채널 생성
+/클랜등록       - 클랜 정보 등록
 ```
 
-## 🧩 명령어
+---
 
-### 인증
-- `/인증설정`
+## ⚙️ 설정 파일
 
-### 로그
-- `/로그설정`
-- `/자동밴설정`
+`cogs/verification.py` 상단에서 변경 가능:
+```python
+VERIFIED_ROLE_NAME = "인증완료"     # 인증 후 역할 이름
+UNVERIFIED_ROLE_NAME = "미인증"     # 입장 시 역할 이름
+MAX_ATTEMPTS = 3                    # 최대 인증 시도 횟수
+TIMEOUT_SECONDS = 120               # 인증 제한 시간
+```
 
-### 보안
-- `/보안설정`
-- `/경고`
-- `/경고초기화`
-- `/레이드모드해제`
-- `/뮤트`
-- `/킥`
-- `/밴`
+`cogs/protection.py` 상단에서 변경 가능:
+```python
+JOIN_THRESHOLD = 5      # 레이드 감지 인원 기준
+JOIN_WINDOW = 10        # 레이드 감지 시간 (초)
+SPAM_THRESHOLD = 5      # 스팸 감지 메시지 수
+WARN_MUTE_THRESHOLD = 3 # 자동 뮤트 경고 횟수
+```
 
-### 유튜브
-- `/유튜브구독`
-- `/유튜브목록`
-- `/유튜브삭제`
+---
 
-### 게임/클랜
-- `/내전`
-- `/팀짜기`
-- `/클랜등록`
-- `/클랜정보`
-- `/내전공지`
-- `/주사위`
-- `/사다리`
+## 📁 파일 구조
 
-### 관리
-- `/청소`
-- `/공지`
-- `/서버정보`
-- `/유저정보`
-- `/도움말`
-
-## 📁 구조
-
-```text
-Dino-discord/
-├── main.py
+```
+clan_bot/
+├── main.py                  # 봇 메인
 ├── requirements.txt
+├── .env                     # 토큰 (git에 올리지 마세요!)
 ├── .env.example
-├── data/                    # 실행 중 자동 생성, Git 제외
+├── data/                    # 자동 생성 (설정 저장)
 └── cogs/
-    ├── verification.py
-    ├── logs.py
-    ├── protection.py
-    ├── youtube.py
-    ├── clan_game.py
-    └── moderation.py
+    ├── verification.py      # 인증 시스템
+    ├── logs.py              # 입퇴장 로그 + 자동밴
+    ├── protection.py        # 레이드보호 + 경고
+    ├── youtube.py           # 유튜브 알림
+    ├── clan_game.py         # 내전, 팀짜기
+    └── moderation.py        # 청소, 공지 등
 ```
 
-## ⚠️ 권한
+---
 
-자동 킥/밴/타임아웃과 역할 부여가 실제로 동작하려면 봇의 역할 계층과 Discord 권한을 확인해야 합니다. 봇의 최고 역할은 관리 대상 역할보다 높아야 합니다.
-
-## 🔒 보안
-
-- 봇 토큰을 소스 코드에 하드코딩하지 않습니다.
-- `.env`와 `data/`는 Git에 올리지 않습니다.
-- 자동 밴은 `/자동밴설정`으로 명시적으로 활성화해야 합니다.
-- 봇이 수행할 수 없는 작업은 예외를 숨기지 않고 로그로 확인할 수 있게 합니다.
+> ⚠️ `.env` 파일은 절대 GitHub에 올리지 마세요. `.gitignore`에 추가하세요.

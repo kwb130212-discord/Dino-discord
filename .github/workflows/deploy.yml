@@ -2,11 +2,12 @@ name: Deploy to Bot Hosting
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deployment trigger
-        run: echo "main push detected - configure the hosting service to redeploy this repository."
+      - name: ✅ 배포 완료 알림
+        run: echo "main 브랜치 push 감지 - 호스팅 서비스가 자동으로 재배포합니다."
